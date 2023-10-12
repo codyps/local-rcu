@@ -41,21 +41,11 @@ pub struct Writer<T> {
 }
 
 impl<T> Drop for Writer<T> {
+    /// WARNING: this will spin until all readers have dropped their `ReadGuard`s to avoid leaking.
+    /// Consider if we should provide a way to avoid this (and defer the collection of old values).
     fn drop(&mut self) {
-        drop(self.sync(SyncKind::Strong));
+        drop(self.sync());
     }
-}
-
-/// What kind of sync to perform
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum SyncKind {
-    /// Don't yield at all, exit as soon as we've scanned for any readers that are still reading.
-    NoYield,
-    /// Yield once, exit as soon as we've scanned for any readers that are still reading the same
-    /// thing.
-    Weak,
-    ///
-    Strong,
 }
 
 struct Shared<T> {
@@ -77,23 +67,75 @@ impl<T> Writer<T> {
         }
     }
 
+    /// Obtain a reader for the value stored by this writer
     pub fn reader(&self) -> Reader<T> {
         Reader::<T>::new(self.shared.clone())
     }
 
+    /// Write a new value, returning any old values that are no longer in use
+    ///
+    /// You may get none of the old values back as readers may still exist. The next time you write
+    /// (or call `try_sync()`), additional previous values are returned. Old values may be returned
+    /// in any order.
+    pub fn write(&mut self, val: Box<T>) -> Vec<Box<T>> {
+        // scan `self.prev` for things we can discard and discard them.
+        let mut r = self.try_sync();
+
+        self.write_nosync(val);
+
+        r.extend(self.try_sync());
+
+        r
+    }
+
+    /// Read the current value in this writer.
+    ///
+    /// This uses a `Relaxed` load, no locking or stricter atomics are required.
     pub fn read(&self) -> &T {
         // Only we can update the value, so `Relaxed` is fine
         unsafe { &*self.shared.active.load(atomic::Ordering::Relaxed) }
     }
 
-    /// Perform a `sync` and a `write` in one step. This is what you want unless you're doing
-    /// explicit `sync` calls.
+    /// Check if we can release previous values and return them
     ///
-    /// If you don't want to re-use old data, and just want things to work without leaking memory,
-    /// use this.
-    pub fn sync_write(&mut self, val: Box<T>) {
-        let remaining_readers = self.sync_top();
+    /// Does not aquire any locks. Returns after a single scan.
+    ///
+    /// If you want to wait for all readers to finish proactively, schedule work using a timer to
+    /// call this periodically. This is generally not required unless you need to obtain old values
+    /// for some special purpose.
+    pub fn try_sync(&mut self) -> Vec<Box<T>> {
+        let mut v = Vec::new();
+        for (ptr, epochs) in &mut self.prevs {
+            epochs.retain(|_, (prev, epoch)| {
+                let new = epoch.load(atomic::Ordering::Relaxed);
+                new == *prev
+            });
 
+            if epochs.is_empty() {
+                v.push(unsafe { std::mem::transmute(*ptr) });
+            }
+        }
+
+        v
+    }
+
+    fn sync(&mut self) -> Vec<Box<T>> {
+        let mut r = Vec::new();
+
+        while !self.prevs.is_empty() {
+            let v = self.try_sync();
+            r.extend(v);
+            std::thread::yield_now();
+        }
+
+        r
+    }
+
+    /// Write a new value, without checking if any old values are no longer in use
+    ///
+    /// If you use this, calling `try_sync()` is required to avoid leaking old values. In general,
+    /// `Writer::write()` is a better choice.
+    pub fn write_nosync(&mut self, val: Box<T>) {
         // We're the only writer, so `Relaxed` is fine
         let prev = self.shared.active.load(atomic::Ordering::Relaxed);
 
@@ -103,45 +145,10 @@ impl<T> Writer<T> {
             .active
             .store(Box::into_raw(val), atomic::Ordering::Release);
 
-        // NOTE: we're being careful here because we can't retire `prev` in this sync because
-        // between `sync_top()` and `active.store()`, readers might have begun a new read-cycle on
-        // `prev`.
-        if self.sync_bottom(remaining_readers, SyncKind::Weak) {
-            let prevs = self.prevs.take();
-            // safe because `*mut T` and `Box<T>` have the same layout
-            drop(unsafe { std::mem::transmute(prev) })
-        }
+        // add `prev` to `self.prevs`, collect initial remaining readers, and see if we can retire
+        // it.
 
-        self.prevs.push(prev);
-
-        // NOTE: we could scan here to see if we're done reading again.
-    }
-
-    /// Perform a `write` without any `sync` calls, will consume memory unless `sync()` is called
-    /// at some point.
-    ///
-    /// This is useful for cases where you're collecting previous values for some re-use via
-    /// explict
-    pub fn write(&mut self, val: Box<T>) {
-        // We're the only writer, so `Relaxed` is fine
-        let prev = self.shared.active.load(atomic::Ordering::Relaxed);
-
-        // Half of a Release-Consume pair, see `Reader::read()` for the `Consume` half. This
-        // ensures that `val` is fully initialized before we update the pointer.
-        self.shared
-            .active
-            .store(Box::into_raw(val), atomic::Ordering::Release);
-        self.prevs.push(prev);
-    }
-
-    fn sync_top(&mut self) -> slab::Slab<(usize, Arc<atomic::AtomicUsize>)> {
-        // Nothing out there that the readers might hold onto
-        if self.prevs.is_empty() {
-            return slab::Slab::new();
-        }
-
-        // NOTE: 0 is a reasonable estimate for the length given we do this at the start of the
-        // next write (instead of immediately after swapping)
+        // NOTE: see if we can predict an initial slab size better than 0
         //
         // NOTE: we're using `slab` here just so we have faster removal. We don't need it's other
         // features.
@@ -150,8 +157,8 @@ impl<T> Writer<T> {
 
         // initial scan, locks epochs
         {
-            let epochs = self.shared.epochs.lock();
-            for (_, epoch) in &epochs {
+            let epochs = self.shared.epochs.lock().unwrap();
+            for (_, epoch) in epochs.iter() {
                 // This pairs with a `Release` in `Reader::read()`, which ensures all the
                 // writes/reads by the reader are retired. We don't need to see the writes done
                 // by the caller of `Reader::read()`, so `Relaxed` is sufficient (`Acquire` would
@@ -163,78 +170,14 @@ impl<T> Writer<T> {
             }
         }
 
-        remaining_readers
-    }
-
-    fn sync_bottom(
-        &mut self,
-        remaining_readers: slab::Slab<(usize, Arc<atomic::AtomicUsize>)>,
-        sync_kind: SyncKind,
-    ) -> bool {
-        if remaining_readers.is_empty() {
-            return false;
-        }
-
-        // wait for the value in each remaining reader's epoch to be different
-        loop {
-            std::thread::yield_now();
-
-            remaining_readers.retain(|v, epoch| {
-                // see comment in the initial scan for memory ordering details
-                let new_v = epoch.load(atomic::Ordering::Relaxed);
-                new_v == v
-            });
-
-            if remaining_readers.is_empty() {
-                return true;
-            }
-
-            if sync_kind == SyncKind::Weak {
-                return false;
-            }
-        }
-    }
-
-    /// Wait for all readers to finish
-    ///
-    /// This is done internally by `write()` as needed, and exposed here only if you really want to
-    /// save memory by freeing the old data before the next `write()`.
-    ///
-    /// This will spin until all readers have finished reading the current value, with only
-    /// `yield_now()` calls to allow other threads to run.
-    ///
-    /// If `weak`, don't block indefinitely, instead return after one `yield_now()`
-    pub fn sync(&mut self, sync_kind: SyncKind) -> Vec<Box<T>> {
-        // Nothing out there that the readers might hold onto
-        if self.prevs.is_empty() {
-            return Vec::new();
-        }
-
-        let remaining_readers = self.sync_top();
-
-        if remaining_readers.is_empty() {
-            return Vec::new();
-        }
-
-        if sync_kind == SyncKind::NoYield {
-            return Vec::new();
-        }
-
-        if !self.sync_bottom(remaining_readers, sync_kind) {
-            return Vec::new();
-        }
-
-        let prevs = self.prevs.take();
-
-        // safe because `*mut T` and `Box<T>` have the same layout
-        unsafe { std::mem::transmute(prevs) }
+        self.prevs.push((prev, remaining_readers));
     }
 }
 
 /// Something which can read the value, use `[Writer::reader]` to get one
 pub struct Reader<T> {
     shared: Arc<Shared<T>>,
-    epoch: Arc<AtomicUsize>,
+    epoch: Arc<atomic::AtomicUsize>,
     epoch_index: usize,
 }
 
@@ -296,22 +239,25 @@ impl<T> Drop for Reader<T> {
 
 /// Allows access to the underlying value
 ///
-/// If this is leaked, then the Writer will stall forever.
+/// If this is leaked, the value it points to will also leak.
 pub struct ReadGuard<'a, T> {
     reader: &'a mut Reader<T>,
     data: &'a T,
 }
 
 impl<'a, T> Deref for ReadGuard<'a, T> {
-    fn deref(&self) -> &T {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
         self.data
     }
 }
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
-        // NOTE: we're the only writer, so we could split this into a load + store if that
-        // generates better code.
-        self.reader.epoch.fetch_add(1, atomic::Ordering::Release);
+        // NOTE: this split operation is ok because were the only writer (others read this value).
+        // This is split into 2 operations so that better code can be generated (ie: omitting CAS
+        // on archs without atomic add opcodes).
+        let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
+        self.reader.epoch.store(v + 1, atomic::Ordering::Relaxed);
     }
 }
