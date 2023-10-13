@@ -72,6 +72,14 @@ impl<T> Writer<T> {
         Reader::<T>::new(self.shared.clone())
     }
 
+    /// Are there any old values waiting to be collected?
+    ///
+    /// These may or may not still have readers that are still using them. If the readers for a
+    /// particular value have moved on, those old values will be returned by `try_sync()`.
+    pub fn has_old_values(&self) -> bool {
+        !self.prevs.is_empty()
+    }
+
     /// Write a new value, returning any old values that are no longer in use
     ///
     /// You may get none of the old values back as readers may still exist. The next time you write
@@ -119,6 +127,9 @@ impl<T> Writer<T> {
         v
     }
 
+    /// `try_sync()` repeatedly until all old values are collected
+    ///
+    /// This spins, and in general should be avoided.
     fn sync(&mut self) -> Vec<Box<T>> {
         let mut r = Vec::new();
 
