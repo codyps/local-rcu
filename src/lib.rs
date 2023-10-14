@@ -36,15 +36,15 @@ pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
     (w, r)
 }
 
-
 /// Writer for a slot. Can also read the value, and create more readers
 /// 
 /// Only 1 of these per slot exists. If multiple writers are needed, wrap this
 /// in a mutex.
 pub struct Writer<T> {
     shared: Arc<Shared<T>>,
-    // we keep these as pointers because they may still be in use, and so freeing them would be
-    // undefined behavior
+    // we keep these as pointers because they may still be in use, and so
+    // freeing them (as would happen on drop by default) would be undefined behavior
+    #[allow(clippy::type_complexity)]
     prevs: Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)>,
 }
 
@@ -233,6 +233,13 @@ impl<T> Reader<T> {
     }
 
     /// Read the value
+    /// 
+    /// To avoid leaking values, the return value of this function must be
+    /// dropped.
+    /// 
+    /// This function is conceptually an `srcu_read_lock()` and a
+    /// `srcu_dereference()`. The `drop` of the return value (`ReadGuard`) is
+    /// conceptually a `srcu_read_unlock()`.
     pub fn read(&mut self) -> ReadGuard<T> {
         // We're using `Relaxed` because all the ordering needed comes from the `Acquire` on
         // `self.shared.active` below.
