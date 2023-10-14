@@ -1,33 +1,34 @@
-/// SPMC (single producer, multiple consumer), latest value only, wait free, deferred collection of
-/// old data.
-///
-/// One (1) writer provides a singe value to multiple readers. Readers _can_ see different versions
-/// of the datastructure simultaniously unless other synchronization is used.
-///
-/// No atomic exchange, compare-and-swap, math operations are used, only loads &
-/// stores (most relaxed, with an Acquire in the reader (per read) and a Release in the
-/// writer (per write)).
-///  
-/// - Reading wait free: only atomics are loads & stores. 1 atomic relaxed rmw
-///   of no-contention data (only 1 writer), 1 atomic Acquire load of shared data.
-/// - Writing aquires an internal mutex to scan for old values to retire. Using
-///   `write_nosync()` (which does not collect old is wait free.
-/// - Creating additional readers aquires an internal mutex & clones some `Arc`s.
-/// - Returning previously written values is deferred. When using `write()`, old
-///   values are automatically examined to determine if they may still be in use
-///   by a reader. If they are definitely not in use by a reader, the old values
-///   are returned.
-///
-/// Alternatives:
-///
-///  - `triple_buffer`: requires atomic swaps. Not wait free. Allows immediate data free/reuse.
-///  - `std::sync::mpsc::channel`: MPSC (vs SPMC), multiple values (not just latest) are readable
-///  - `tokio::sync::watch`: ...
-///  - `left-right`: ...
-///  - `tokio::sync::broadcast`: ...
-///
+//! SPMC (single producer, multiple consumer), latest value only, wait free, deferred collection of
+//! old data.
+//!
+//! One (1) writer provides a singe value to multiple readers. Readers _can_ see different versions
+//! of the datastructure simultaniously unless other synchronization is used.
+//!
+//! No atomic exchange, compare-and-swap, math operations are used, only loads &
+//! stores (most relaxed, with an Acquire in the reader (per read) and a Release in the
+//! writer (per write)).
+//!  
+//! - Reading wait free: only atomics are loads & stores. 1 atomic relaxed rmw
+//!   of no-contention data (only 1 writer), 1 atomic Acquire load of shared data.
+//! - Writing aquires an internal mutex to scan for old values to retire. Using
+//!   `write_nosync()` (which does not collect old is wait free.
+//! - Creating additional readers aquires an internal mutex & clones some `Arc`s.
+//! - Returning previously written values is deferred. When using `write()`, old
+//!   values are automatically examined to determine if they may still be in use
+//!   by a reader. If they are definitely not in use by a reader, the old values
+//!   are returned.
+//!
+#[cfg(loom)]
+use loom::{
+    sync::{atomic, Arc, Mutex},
+    thread,
+};
 use std::ops::Deref;
-use std::sync::{atomic, Arc, Mutex};
+#[cfg(not(loom))]
+use std::{
+    sync::{atomic, Arc, Mutex},
+    thread,
+};
 
 /// Create a new SPMC slot containing an initial value `init_val`
 pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
@@ -153,13 +154,15 @@ impl<T> Writer<T> {
     /// `try_sync()` repeatedly until all old values are collected
     ///
     /// This spins, and in general should be avoided.
-    fn sync(&mut self) -> Vec<Box<T>> {
+    pub fn sync(&mut self) -> Vec<Box<T>> {
         let mut r = Vec::new();
 
         while !self.prevs.is_empty() {
             let v = self.try_sync();
             r.extend(v);
-            std::thread::yield_now();
+
+            // TODO: consider if we should skip yielding a bit initially
+            thread::yield_now();
         }
 
         r
@@ -170,7 +173,8 @@ impl<T> Writer<T> {
     /// If you use this, calling `try_sync()` is required to avoid leaking old values. In general,
     /// `Writer::write()` is a better choice.
     pub fn write_nosync(&mut self, val: Box<T>) {
-        // We're the only writer, so `Relaxed` is fine
+        // We're the only writer, so `Relaxed` is fine. We avoid a `swap`
+        // because that provides extra garuntees we don't need.
         let prev = self.shared.active.load(atomic::Ordering::Relaxed);
 
         // Half of a Release-Consume pair, see `Reader::read()` for the `Consume` half. This

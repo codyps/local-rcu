@@ -2,6 +2,20 @@
 name = "local-rcu"
 version = "0.1.0"
 edition = "2021"
+authors = [ "Cody P Schafer <dev@codyps.com>"]
+license = "OSL-3.0"
+description = "RCU with a safe API and local collection of old values"
+readme = "README.md"
 
 [dependencies]
 slab = "0.4.9"
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7.1"
+
+[dev-dependencies]
+criterion = { version = "0.5.1" }
+
+[[bench]]
+name = "b"
+harness = false
