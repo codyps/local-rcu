@@ -37,7 +37,7 @@ pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
 }
 
 /// Writer for a slot. Can also read the value, and create more readers
-/// 
+///
 /// Only 1 of these per slot exists. If multiple writers are needed, wrap this
 /// in a mutex.
 pub struct Writer<T> {
@@ -233,10 +233,10 @@ impl<T> Reader<T> {
     }
 
     /// Read the value
-    /// 
+    ///
     /// To avoid leaking values, the return value of this function must be
     /// dropped.
-    /// 
+    ///
     /// This function is conceptually an `srcu_read_lock()` and a
     /// `srcu_dereference()`. The `drop` of the return value (`ReadGuard`) is
     /// conceptually a `srcu_read_unlock()`.
@@ -261,7 +261,7 @@ impl<T> Reader<T> {
         // `|1` we'd only get the epoch to change (still in the leak case) when
         // we drop this new `ReadGuard`. The `+ 1` part ensures we always move
         // to a new epoch.
-        self.epoch.store((v + 1)| 1, atomic::Ordering::Relaxed);
+        self.epoch.store((v + 1) | 1, atomic::Ordering::Relaxed);
 
         // Pairs with a `Release` in `Writer::write()`, which ensures that we see all the writes
         // writer makes to things we load via `data`.

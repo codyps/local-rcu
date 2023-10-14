@@ -1,5 +1,5 @@
 #[test]
- fn send_100_from_1_to_1() {
+fn send_100_from_1_to_1() {
     let n = 100usize;
     let (mut tx, mut rx) = local_rcu::slot(0usize);
 
@@ -29,7 +29,7 @@
 }
 
 #[test]
- fn send_100_from_1_to_m() {
+fn send_100_from_1_to_m() {
     let n = 1000usize;
     let m = 10usize;
     let (mut tx, rx) = local_rcu::slot(0usize);
