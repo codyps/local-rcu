@@ -4,10 +4,19 @@
 /// One (1) writer provides a singe value to multiple readers. Readers _can_ see different versions
 /// of the datastructure simultaniously unless other synchronization is used.
 ///
-/// - Reading is optimized and wait free: 1 atomic relaxed rmw of no-contention data (only 1
-///   writer), 1 atomic Acquire load of shared data.
-/// - Writing is wait free (various relaxed atomic loads, 1 atomic Release store of shared data)
-/// - Freeing previously sent data is deferred.
+/// No atomic exchange, compare-and-swap, math operations are used, only loads &
+/// stores (most relaxed, with an Acquire in the reader (per read) and a Release in the
+/// writer (per write)).
+///  
+/// - Reading wait free: only atomics are loads & stores. 1 atomic relaxed rmw
+///   of no-contention data (only 1 writer), 1 atomic Acquire load of shared data.
+/// - Writing aquires an internal mutex to scan for old values to retire. Using
+///   `write_nosync()` (which does not collect old is wait free.
+/// - Creating additional readers aquires an internal mutex & clones some `Arc`s.
+/// - Returning previously written values is deferred. When using `write()`, old
+///   values are automatically examined to determine if they may still be in use
+///   by a reader. If they are definitely not in use by a reader, the old values
+///   are returned.
 ///
 /// Alternatives:
 ///
@@ -27,19 +36,11 @@ pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
     (w, r)
 }
 
-// Ideas:
-//
-// - make `sync_top()` and `sync_bottom()` public safely (hard because we have a single `prev` list
-//   we want to retire all at once.
-// - abandon the "all at once" retire of `prev`, track epochs of readers for each `prev` so we've
-//   got a better chance of retiring _some_ of them. ie: this would garuntee that we make forward
-//   progress even if we never call `sync(SyncKind::Strong)`. This means more overhead, and it's
-//   not clear we can do both the "all at once" and "at least the old ones" in the same data
-//   structure.
-// - split out the garbage collection into some pluggable op that can defer it if desired (and
-//   allow us to wait in a different thread, on a async task, do either the "all at once" or "more
-//   exact" waiting, etc.
 
+/// Writer for a slot. Can also read the value, and create more readers
+/// 
+/// Only 1 of these per slot exists. If multiple writers are needed, wrap this
+/// in a mutex.
 pub struct Writer<T> {
     shared: Arc<Shared<T>>,
     // we keep these as pointers because they may still be in use, and so freeing them would be
@@ -102,6 +103,12 @@ impl<T> Writer<T> {
     /// This uses a `Relaxed` load, no locking or stricter atomics are required.
     pub fn read(&self) -> &T {
         // Only we can update the value, so `Relaxed` is fine
+        // SAFETY:
+        // We're the only writer, and a `&mut self` is the only way to replace
+        // this with a new value. As a result, the pointer can't become invalid
+        // because we've bound its lifetime to `&self`.
+        // There are no mutable references, because we only hand out read-only
+        // refs to the readers.
         unsafe { &*self.shared.active.load(atomic::Ordering::Relaxed) }
     }
 
@@ -130,6 +137,9 @@ impl<T> Writer<T> {
             });
 
             if epochs.is_empty() {
+                // SAFETY: no readers are left (because all have moved to a new
+                // epoch). We're removing it from `self.prevs` to, so there
+                // won't be another `Box` created for this pointer.
                 v.push(unsafe { Box::from_raw(*ptr) });
                 false
             } else {
@@ -222,11 +232,7 @@ impl<T> Reader<T> {
         }
     }
 
-    /// Read the value, avoid leaking `ReadGuard` and drop `ReadGuard` to as soon as possible.
-    ///
-    /// Leaking `ReadGuard` will cause the `Writer::sync()` (and thus `Writer::write()`) to stall
-    /// forever. `Writer::sync()` (and thus `Writer::write()`) will stall until `ReadGuard` is
-    /// dropped.
+    /// Read the value
     pub fn read(&mut self) -> ReadGuard<T> {
         // We're using `Relaxed` because all the ordering needed comes from the `Acquire` on
         // `self.shared.active` below.
@@ -237,7 +243,18 @@ impl<T> Reader<T> {
         // TODO: check that compilers emit better code on various archs for this split version vs a
         // merged `add` op.
         let v = self.epoch.load(atomic::Ordering::Relaxed);
-        self.epoch.store(v | 1, atomic::Ordering::Relaxed);
+
+        // NOTE: we use `(v + 1)|1` instead of `+1` here in case the previous
+        // `ReadGuard` was leaked. If the previous `ReadGuard` was leaked, we'll
+        // still have an epoch with the low bit set, and we want to keep that
+        // low bit set.
+        //
+        // In the previous leak case, the writer will consider 0 or more
+        // previous values in use until the `epoch` changes. If we did just a
+        // `|1` we'd only get the epoch to change (still in the leak case) when
+        // we drop this new `ReadGuard`. The `+ 1` part ensures we always move
+        // to a new epoch.
+        self.epoch.store((v + 1)| 1, atomic::Ordering::Relaxed);
 
         // Pairs with a `Release` in `Writer::write()`, which ensures that we see all the writes
         // writer makes to things we load via `data`.
@@ -249,6 +266,11 @@ impl<T> Reader<T> {
 
         ReadGuard {
             reader: self,
+            // SAFETY: we've told the writer (via the epoch) that we're reading
+            // a value (by setting the low bit of the epoch), so it won't delete
+            // the value until we update our epoch. We only update our epoch
+            // when this `ReadGuard` is dropped. No `&mut`s are handed out to
+            // the data while it's in the `active` slot.
             data: unsafe { &*data },
         }
     }
@@ -277,7 +299,7 @@ impl<'a, T> Deref for ReadGuard<'a, T> {
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
-        // NOTE: this split operation is ok because were the only writer (others read this value).
+        // NOTE: this split operation is ok because we are the only writer (others read this value).
         // This is split into 2 operations so that better code can be generated (ie: omitting CAS
         // on archs without atomic add opcodes).
         let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
