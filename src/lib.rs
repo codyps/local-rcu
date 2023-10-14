@@ -20,6 +20,13 @@
 use std::ops::Deref;
 use std::sync::{atomic, Arc, Mutex};
 
+/// Create a new SPMC slot containing an initial value `init_val`
+pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
+    let w = Writer::new(Box::new(init_val));
+    let r = w.reader();
+    (w, r)
+}
+
 // Ideas:
 //
 // - make `sync_top()` and `sync_bottom()` public safely (hard because we have a single `prev` list
@@ -37,8 +44,10 @@ pub struct Writer<T> {
     shared: Arc<Shared<T>>,
     // we keep these as pointers because they may still be in use, and so freeing them would be
     // undefined behavior
-    prevs: Vec<(*mut T, slab::Slab<(usize, Arc<atomic::AtomicUsize>)>)>,
+    prevs: Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)>,
 }
+
+unsafe impl<T: Send> Send for Writer<T> {}
 
 impl<T> Drop for Writer<T> {
     /// WARNING: this will spin until all readers have dropped their `ReadGuard`s to avoid leaking.
@@ -72,14 +81,6 @@ impl<T> Writer<T> {
         Reader::<T>::new(self.shared.clone())
     }
 
-    /// Are there any old values waiting to be collected?
-    ///
-    /// These may or may not still have readers that are still using them. If the readers for a
-    /// particular value have moved on, those old values will be returned by `try_sync()`.
-    pub fn has_old_values(&self) -> bool {
-        !self.prevs.is_empty()
-    }
-
     /// Write a new value, returning any old values that are no longer in use
     ///
     /// You may get none of the old values back as readers may still exist. The next time you write
@@ -104,6 +105,14 @@ impl<T> Writer<T> {
         unsafe { &*self.shared.active.load(atomic::Ordering::Relaxed) }
     }
 
+    /// Are there any old values waiting to be collected?
+    ///
+    /// These may or may not still have readers that are still using them. If the readers for a
+    /// particular value have moved on, those old values will be returned by `try_sync()`.
+    pub fn has_old_values(&self) -> bool {
+        !self.prevs.is_empty()
+    }
+
     /// Check if we can release previous values and return them
     ///
     /// Does not aquire any locks. Returns after a single scan.
@@ -113,16 +122,20 @@ impl<T> Writer<T> {
     /// for some special purpose.
     pub fn try_sync(&mut self) -> Vec<Box<T>> {
         let mut v = Vec::new();
-        for (ptr, epochs) in &mut self.prevs {
-            epochs.retain(|_, (prev, epoch)| {
+
+        self.prevs.retain_mut(|(ptr, epochs)| {
+            epochs.retain(|(prev, epoch)| {
                 let new = epoch.load(atomic::Ordering::Relaxed);
                 new == *prev
             });
 
             if epochs.is_empty() {
-                v.push(unsafe { std::mem::transmute(*ptr) });
+                v.push(unsafe { Box::from_raw(*ptr) });
+                false
+            } else {
+                true
             }
-        }
+        });
 
         v
     }
@@ -161,10 +174,9 @@ impl<T> Writer<T> {
 
         // NOTE: see if we can predict an initial slab size better than 0
         //
-        // NOTE: we're using `slab` here just so we have faster removal. We don't need it's other
-        // features.
-        // TODO: check that `slab` has faster removal than `Vec` when using `retain()`.
-        let mut remaining_readers = slab::Slab::new();
+        // NOTE: `Vec` gives us `retain_mut` for collecting these at the end. If
+        // `Slab` had retain_mut we could use it instead if it provides better perf.
+        let mut remaining_readers = Vec::new();
 
         // initial scan, locks epochs
         {
@@ -176,7 +188,7 @@ impl<T> Writer<T> {
                 // ensure we see writes).
                 let v = epoch.load(atomic::Ordering::Relaxed);
                 if v & 1 != 0 {
-                    remaining_readers.insert((v, epoch.clone()));
+                    remaining_readers.push((v, epoch.clone()));
                 }
             }
         }
