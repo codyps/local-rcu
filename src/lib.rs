@@ -134,6 +134,7 @@ impl<T> Writer<T> {
         self.prevs.retain_mut(|(ptr, epochs)| {
             epochs.retain(|(prev, epoch)| {
                 let new = epoch.load(atomic::Ordering::SeqCst);
+                atomic::fence(atomic::Ordering::SeqCst);
                 println!("new: {:08b}, prev: {:08b}", new, prev);
                 new == *prev
             });
@@ -184,6 +185,7 @@ impl<T> Writer<T> {
         self.shared
             .active
             .store(Box::into_raw(val), atomic::Ordering::SeqCst);
+        atomic::fence(atomic::Ordering::SeqCst);
 
         // add `prev` to `self.prevs`, collect initial remaining readers, and see if we can retire
         // it.
@@ -205,6 +207,7 @@ impl<T> Writer<T> {
                 // by the caller of `Reader::read()`, so `Relaxed` is sufficient (`Acquire` would
                 // ensure we see writes).
                 let v = epoch.load(atomic::Ordering::SeqCst);
+                atomic::fence(atomic::Ordering::SeqCst);
                 if v & 1 != 0 {
                     remaining_readers.push((v, epoch.clone()));
                 }
@@ -275,6 +278,7 @@ impl<T> Reader<T> {
         // `SeqCst` should ensure that, but perhaps a fence or weaker ordering
         // could be sufficient.
         self.epoch.store(v | 1, atomic::Ordering::SeqCst);
+        atomic::fence(atomic::Ordering::SeqCst);
 
         // Pairs with a `Release` in `Writer::write()`, which ensures that we see all the writes
         // writer makes to things we load via `data`.
@@ -283,6 +287,7 @@ impl<T> Reader<T> {
         // ensure that loads via it have a data dependency on other writes), but we need the
         // `self.epoch` change to be visible to the writer, so we use `Acquire` here.
         let data = self.shared.active.load(atomic::Ordering::SeqCst);
+        atomic::fence(atomic::Ordering::SeqCst);
 
         ReadGuard {
             reader: self,
@@ -324,5 +329,6 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         // on archs without atomic add opcodes).
         let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
         self.reader.epoch.store(v + 1, atomic::Ordering::SeqCst);
+        atomic::fence(atomic::Ordering::SeqCst);
     }
 }
