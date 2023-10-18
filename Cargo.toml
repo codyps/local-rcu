@@ -11,7 +11,7 @@ readme = "README.md"
 slab = "0.4.9"
 
 [target.'cfg(loom)'.dependencies]
-loom = "0.7.1"
+loom = { version = "0.7.1", features = [ "checkpoint" ] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1" }
@@ -19,3 +19,6 @@ criterion = { version = "0.5.1" }
 [[bench]]
 name = "b"
 harness = false
+
+[profile.release]
+debug = true

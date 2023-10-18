@@ -53,7 +53,7 @@ unsafe impl<T: Send> Send for Writer<T> {}
 
 impl<T> Drop for Writer<T> {
     /// WARNING: this will spin until all readers have dropped their `ReadGuard`s to avoid leaking.
-    /// Consider if we should provide a way to avoid this (and defer the collection of old values).
+    // Consider if we should provide a way to avoid this (and defer the collection of old values).
     fn drop(&mut self) {
         drop(self.sync());
     }
@@ -133,7 +133,8 @@ impl<T> Writer<T> {
 
         self.prevs.retain_mut(|(ptr, epochs)| {
             epochs.retain(|(prev, epoch)| {
-                let new = epoch.load(atomic::Ordering::Relaxed);
+                let new = epoch.load(atomic::Ordering::SeqCst);
+                println!("new: {:08b}, prev: {:08b}", new, prev);
                 new == *prev
             });
 
@@ -141,6 +142,7 @@ impl<T> Writer<T> {
                 // SAFETY: no readers are left (because all have moved to a new
                 // epoch). We're removing it from `self.prevs` to, so there
                 // won't be another `Box` created for this pointer.
+                atomic::fence(atomic::Ordering::SeqCst);
                 v.push(unsafe { Box::from_raw(*ptr) });
                 false
             } else {
@@ -177,11 +179,11 @@ impl<T> Writer<T> {
         // because that provides extra garuntees we don't need.
         let prev = self.shared.active.load(atomic::Ordering::Relaxed);
 
-        // Half of a Release-Consume pair, see `Reader::read()` for the `Consume` half. This
-        // ensures that `val` is fully initialized before we update the pointer.
+        // Half of a Release-Acquire pair, see `Reader::read()` for the `Acquire` half. `Release`
+        // ensures that `val` is fully initialized before it is exposed to other threads.
         self.shared
             .active
-            .store(Box::into_raw(val), atomic::Ordering::Release);
+            .store(Box::into_raw(val), atomic::Ordering::SeqCst);
 
         // add `prev` to `self.prevs`, collect initial remaining readers, and see if we can retire
         // it.
@@ -195,16 +197,19 @@ impl<T> Writer<T> {
         // initial scan, locks epochs
         {
             let epochs = self.shared.epochs.lock().unwrap();
+            // FIXME: the `epochs.lock()` should already be doing this. Check `loom`.
+            atomic::fence(atomic::Ordering::SeqCst);
             for (_, epoch) in epochs.iter() {
                 // This pairs with a `Release` in `Reader::read()`, which ensures all the
                 // writes/reads by the reader are retired. We don't need to see the writes done
                 // by the caller of `Reader::read()`, so `Relaxed` is sufficient (`Acquire` would
                 // ensure we see writes).
-                let v = epoch.load(atomic::Ordering::Relaxed);
+                let v = epoch.load(atomic::Ordering::SeqCst);
                 if v & 1 != 0 {
                     remaining_readers.push((v, epoch.clone()));
                 }
             }
+            atomic::fence(atomic::Ordering::SeqCst);
         }
 
         self.prevs.push((prev, remaining_readers));
@@ -265,7 +270,11 @@ impl<T> Reader<T> {
         // `|1` we'd only get the epoch to change (still in the leak case) when
         // we drop this new `ReadGuard`. The `+ 1` part ensures we always move
         // to a new epoch.
-        self.epoch.store((v + 1) | 1, atomic::Ordering::Relaxed);
+        //
+        // We need this to be visible to the writer before we read `active`.
+        // `SeqCst` should ensure that, but perhaps a fence or weaker ordering
+        // could be sufficient.
+        self.epoch.store(v | 1, atomic::Ordering::SeqCst);
 
         // Pairs with a `Release` in `Writer::write()`, which ensures that we see all the writes
         // writer makes to things we load via `data`.
@@ -273,7 +282,7 @@ impl<T> Reader<T> {
         // Note: `Consume` is good enough for this operation (ie: wrt `active` we only need to
         // ensure that loads via it have a data dependency on other writes), but we need the
         // `self.epoch` change to be visible to the writer, so we use `Acquire` here.
-        let data = self.shared.active.load(atomic::Ordering::Acquire);
+        let data = self.shared.active.load(atomic::Ordering::SeqCst);
 
         ReadGuard {
             reader: self,
@@ -314,6 +323,6 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         // This is split into 2 operations so that better code can be generated (ie: omitting CAS
         // on archs without atomic add opcodes).
         let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
-        self.reader.epoch.store(v + 1, atomic::Ordering::Relaxed);
+        self.reader.epoch.store(v + 1, atomic::Ordering::SeqCst);
     }
 }
