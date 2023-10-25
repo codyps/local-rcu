@@ -186,7 +186,9 @@ impl<T> Writer<T> {
         self.shared
             .active
             .store(Box::into_raw(val), atomic::Ordering::Release);
-        atomic::fence(atomic::Ordering::Release);
+        // Can be `Release` if the `SeqCst` fence is placed before the epoch
+        // iter below (after epochs.lock())
+        atomic::fence(atomic::Ordering::SeqCst);
 
         // add `prev` to `self.prevs`, collect initial remaining readers, and see if we can retire
         // it.
@@ -201,7 +203,7 @@ impl<T> Writer<T> {
         {
             let epochs = self.shared.epochs.lock().unwrap();
             // FIXME: the `epochs.lock()` should already be doing this. Check `loom`.
-            atomic::fence(atomic::Ordering::SeqCst);
+            // FIXME: determine why anything less than `SeqCst` here causes loom to fail.
             for (_, epoch) in epochs.iter() {
                 // This pairs with a `Release` in `Reader::read()`, which ensures all the
                 // writes/reads by the reader are retired. We don't need to see the writes done
