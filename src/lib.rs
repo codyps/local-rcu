@@ -281,12 +281,13 @@ impl<T> Reader<T> {
         self.epoch.store(v | 1, atomic::Ordering::Relaxed);
         atomic::fence(atomic::Ordering::SeqCst);
 
-        // Pairs with a `Release` in `Writer::write()`, which ensures that we see all the writes
-        // writer makes to things we load via `data`.
+        // Pairs with a `Release` in `Writer::write()`, which ensures that we
+        // see all the writes writer makes to things we load via `data`.
         //
         // Note: `Consume` is good enough for this operation (ie: wrt `active` we only need to
-        // ensure that loads via it have a data dependency on other writes), but we need the
-        // `self.epoch` change to be visible to the writer, so we use `Acquire` here.
+        // ensure that loads via it have a data dependency on other writes).
+        // `Consume` isn't supported by current rust/loom though, so we use the
+        // stronger `Acquire`.
         let data = self.shared.active.load(atomic::Ordering::Acquire);
 
         ReadGuard {
