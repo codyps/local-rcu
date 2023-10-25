@@ -263,22 +263,15 @@ impl<T> Reader<T> {
         // TODO: check that compilers emit better code on various archs for this split version vs a
         // merged `add` op.
         let v = self.epoch.load(atomic::Ordering::Relaxed);
+        assert!(v & 1 == 0);
 
-        // NOTE: we use `(v + 1)|1` instead of `+1` here in case the previous
-        // `ReadGuard` was leaked. If the previous `ReadGuard` was leaked, we'll
-        // still have an epoch with the low bit set, and we want to keep that
-        // low bit set.
-        //
-        // In the previous leak case, the writer will consider 0 or more
-        // previous values in use until the `epoch` changes. If we did just a
-        // `|1` we'd only get the epoch to change (still in the leak case) when
-        // we drop this new `ReadGuard`. The `+ 1` part ensures we always move
-        // to a new epoch.
-        //
-        // We need this to be visible to the writer before we read `active`.
-        // `SeqCst` should ensure that, but perhaps a fence or weaker ordering
-        // could be sufficient.
+        // NOTE: we can't call `read()` a second time if we leak the previous
+        // `ReadGuard`, so we can assume well behaved values.
         self.epoch.store(v | 1, atomic::Ordering::Relaxed);
+
+        // Ensure `epoch` store is visible in other threads before we read
+        // `active` (so we don't get a garbage pointer)
+        // TODO: determine why AquRel isn't enough here
         atomic::fence(atomic::Ordering::SeqCst);
 
         // Pairs with a `Release` in `Writer::write()`, which ensures that we
@@ -329,6 +322,7 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         // This is split into 2 operations so that better code can be generated (ie: omitting CAS
         // on archs without atomic add opcodes).
         let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
+        assert!(v & 1 != 0);
         self.reader.epoch.store(v + 1, atomic::Ordering::Release);
         // NOTE: adding a fence(SeqCst) here speeds up loom significantly,
         // implying not having it opens up many more execution variants. This

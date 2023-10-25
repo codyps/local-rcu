@@ -10,18 +10,22 @@ readers examining them).
 
 ## Alternatives:
 
-Compared to `local-rcu` ...
+Compared to `local-rcu`:
 
 - [`triple_buffer`](https://crates.io/crates/triple_buffer): requires atomic
-  swaps. Allows immediate data free/reuse.
+  swaps. Allows immediate data free/reuse. Single Consumer.
 - `std::sync::mpsc::channel`: MPSC (vs SPMC), multiple values (not just latest) are readable
-- `tokio::sync::watch`: Allows being notified of updates via async, uses a mutex
-  to control access to the value. Readers block writers.
 - [`left-right`](https://crates.io/crates/left-right): Uses single "old" value
   instead of having arbitrary numbers of old values. This means readers can block
   the writer. It requires implementing a concept of "Absorb" to place modification
   of the "old" value into `left-right` internals.
-- `tokio::sync::broadcast`: ...
+- [`tokio::sync::watch`](https://docs.rs/tokio/latest/tokio/sync/watch/index.html):
+  Allows being notified of updates via async, uses a mutex to control access to
+  the value. Readers block writers.
+- [`tokio::sync::broadcast`](https://docs.rs/tokio/latest/tokio/sync/broadcast/index.html):
+  supports multiple producers, provides some "history" (previous values) instead
+  of only the most recent value, supports async waiting for new values, uses
+  Mutexes internally.
 
 ## If I want behavior like X, what should I do?
 
