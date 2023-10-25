@@ -133,8 +133,7 @@ impl<T> Writer<T> {
 
         self.prevs.retain_mut(|(ptr, epochs)| {
             epochs.retain(|(prev, epoch)| {
-                let new = epoch.load(atomic::Ordering::SeqCst);
-                atomic::fence(atomic::Ordering::SeqCst);
+                let new = epoch.load(atomic::Ordering::Relaxed);
                 println!("new: {:08b}, prev: {:08b}", new, prev);
                 new == *prev
             });
@@ -286,8 +285,8 @@ impl<T> Reader<T> {
         // Note: `Consume` is good enough for this operation (ie: wrt `active` we only need to
         // ensure that loads via it have a data dependency on other writes), but we need the
         // `self.epoch` change to be visible to the writer, so we use `Acquire` here.
-        let data = self.shared.active.load(atomic::Ordering::SeqCst);
-        atomic::fence(atomic::Ordering::SeqCst);
+        let data = self.shared.active.load(atomic::Ordering::Relaxed);
+        atomic::fence(atomic::Ordering::Acquire);
 
         ReadGuard {
             reader: self,

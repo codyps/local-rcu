@@ -12,7 +12,8 @@ readers examining them).
 
 Compared to `local-rcu` ...
 
-- [`triple_buffer`](): requires atomic swaps. Allows immediate data free/reuse.
+- [`triple_buffer`](https://crates.io/crates/triple_buffer): requires atomic
+  swaps. Allows immediate data free/reuse.
 - `std::sync::mpsc::channel`: MPSC (vs SPMC), multiple values (not just latest) are readable
 - `tokio::sync::watch`: Allows being notified of updates via async, uses a mutex
   to control access to the value. Readers block writers.
