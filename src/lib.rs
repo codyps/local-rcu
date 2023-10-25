@@ -139,10 +139,12 @@ impl<T> Writer<T> {
             });
 
             if epochs.is_empty() {
+                // TODO: consider if we require a fence here to ensure all reads
+                // have occured before this point.
+
                 // SAFETY: no readers are left (because all have moved to a new
-                // epoch). We're removing it from `self.prevs` to, so there
+                // epoch). We're removing it from `self.prevs` too, so there
                 // won't be another `Box` created for this pointer.
-                atomic::fence(atomic::Ordering::SeqCst);
                 v.push(unsafe { Box::from_raw(*ptr) });
                 false
             } else {
@@ -205,13 +207,11 @@ impl<T> Writer<T> {
                 // writes/reads by the reader are retired. We don't need to see the writes done
                 // by the caller of `Reader::read()`, so `Relaxed` is sufficient (`Acquire` would
                 // ensure we see writes).
-                let v = epoch.load(atomic::Ordering::SeqCst);
-                atomic::fence(atomic::Ordering::SeqCst);
+                let v = epoch.load(atomic::Ordering::Relaxed);
                 if v & 1 != 0 {
                     remaining_readers.push((v, epoch.clone()));
                 }
             }
-            atomic::fence(atomic::Ordering::SeqCst);
         }
 
         self.prevs.push((prev, remaining_readers));
