@@ -183,8 +183,8 @@ impl<T> Writer<T> {
         // ensures that `val` is fully initialized before it is exposed to other threads.
         self.shared
             .active
-            .store(Box::into_raw(val), atomic::Ordering::SeqCst);
-        atomic::fence(atomic::Ordering::SeqCst);
+            .store(Box::into_raw(val), atomic::Ordering::Release);
+        atomic::fence(atomic::Ordering::Release);
 
         // add `prev` to `self.prevs`, collect initial remaining readers, and see if we can retire
         // it.
@@ -276,7 +276,7 @@ impl<T> Reader<T> {
         // We need this to be visible to the writer before we read `active`.
         // `SeqCst` should ensure that, but perhaps a fence or weaker ordering
         // could be sufficient.
-        self.epoch.store(v | 1, atomic::Ordering::SeqCst);
+        self.epoch.store(v | 1, atomic::Ordering::Relaxed);
         atomic::fence(atomic::Ordering::SeqCst);
 
         // Pairs with a `Release` in `Writer::write()`, which ensures that we see all the writes
@@ -285,8 +285,7 @@ impl<T> Reader<T> {
         // Note: `Consume` is good enough for this operation (ie: wrt `active` we only need to
         // ensure that loads via it have a data dependency on other writes), but we need the
         // `self.epoch` change to be visible to the writer, so we use `Acquire` here.
-        let data = self.shared.active.load(atomic::Ordering::Relaxed);
-        atomic::fence(atomic::Ordering::Acquire);
+        let data = self.shared.active.load(atomic::Ordering::Acquire);
 
         ReadGuard {
             reader: self,
@@ -327,7 +326,11 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         // This is split into 2 operations so that better code can be generated (ie: omitting CAS
         // on archs without atomic add opcodes).
         let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
-        self.reader.epoch.store(v + 1, atomic::Ordering::SeqCst);
-        atomic::fence(atomic::Ordering::SeqCst);
+        self.reader.epoch.store(v + 1, atomic::Ordering::Release);
+        // NOTE: adding a fence(SeqCst) here speeds up loom significantly,
+        // implying not having it opens up many more execution variants. This
+        // implies:
+        // - omitting the fence may be useful for perf
+        // - omitting the fence opens up lots of ways for our code to be wrong.
     }
 }
