@@ -48,7 +48,9 @@ jobs:
       - name: sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.3
       - name: Install toolchain
-        uses: dtolnay/rust-toolchain@${{ matrix.rust_version}}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust_version}}
       - run: cargo build --all-targets
       - run: cargo test
       - run: ./loom.sh -- loom
