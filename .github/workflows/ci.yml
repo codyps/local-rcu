@@ -1,0 +1,33 @@
+on:
+  pull_request:
+  push:
+jobs:
+  with-nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v4
+      - name: Run the Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v1
+      - name: Build
+        run: |
+          nix build
+  with-cargo:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust_version: [stable, beta, 1.72.0]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: rust-cache
+        uses: Swatinem/rust-cache@v2
+      - name: sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.3
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@${{ matrix.rust_version}}
+      - run: cargo build --all-targets
+      - run: cargo test
+      - run: ./loom.sh -- loom
+
