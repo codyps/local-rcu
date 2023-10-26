@@ -23,7 +23,6 @@ jobs:
       - name: Run the Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v1
       - run: nix-shell --pure --run "cargo fmt --check"
-      - 
   with-nix:
     runs-on: ubuntu-latest
     steps:
