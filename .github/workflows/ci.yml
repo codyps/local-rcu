@@ -2,6 +2,28 @@ on:
   pull_request:
   push:
 jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: auguwu/clippy-action@1.2.1
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v4
+      - name: Run the Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v1
+      - run: nix-shell --pure --run "cargo fmt --check"
+      - 
   with-nix:
     runs-on: ubuntu-latest
     steps:
