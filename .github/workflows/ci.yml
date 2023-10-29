@@ -3,6 +3,7 @@ on:
   push:
 env:
   RUST_BACKTRACE: "1"
+  RUSTC_WRAPPER: "sccache"
 name: "ci"
 jobs:
   clippy_check:
