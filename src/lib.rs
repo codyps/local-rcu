@@ -134,7 +134,6 @@ impl<T> Writer<T> {
         self.prevs.retain_mut(|(ptr, epochs)| {
             epochs.retain(|(prev, epoch)| {
                 let new = epoch.load(atomic::Ordering::Relaxed);
-                println!("new: {:08b}, prev: {:08b}", new, prev);
                 new == *prev
             });
 
