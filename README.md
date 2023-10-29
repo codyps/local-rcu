@@ -16,9 +16,11 @@ Compared to `local-rcu`:
   swaps. Allows immediate data free/reuse. Single Consumer.
 - `std::sync::mpsc::channel`: MPSC (vs SPMC), multiple values (not just latest) are readable
 - [`left-right`](https://crates.io/crates/left-right): Uses single "old" value
-  instead of having arbitrary numbers of old values. This means readers can block
-  the writer. It requires implementing a concept of "Absorb" to place modification
-  of the "old" value into `left-right` internals.
+  instead of having arbitrary numbers of old values. Slow readers can prevent
+  new values from being published. It requires implementing a concept of
+  "Absorb" to place modification of the "old" value into `left-right`
+  internals. Uses an "operation log" so that writers don't block on readers
+  directly (only publishing is blocked).
 - [`tokio::sync::watch`](https://docs.rs/tokio/latest/tokio/sync/watch/index.html):
   Allows being notified of updates via async, uses a mutex to control access to
   the value. Readers block writers.
