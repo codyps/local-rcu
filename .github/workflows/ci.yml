@@ -11,7 +11,7 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run the Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v1
+        uses: DeterminateSystems/magic-nix-cache-action@v2
       - name: Run Clippy
         run: nix develop .#clippy --command cargo clippy --all-targets --all-features
       - name: Sccache stats
@@ -23,7 +23,7 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run the Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v1
+        uses: DeterminateSystems/magic-nix-cache-action@v2
       - run: nix develop .#fmt --command cargo fmt --check
   with-nix:
     runs-on: ubuntu-latest
@@ -32,7 +32,7 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run the Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v1
+        uses: DeterminateSystems/magic-nix-cache-action@v2
       - name: Build
         run: nix build
       # TODO: get `sccache` enabled here.
@@ -43,7 +43,7 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run the Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@v1
+        uses: DeterminateSystems/magic-nix-cache-action@v2
       - name: Build everything
         run: nix develop --command cargo build --all-targets
       - name: Run tests
