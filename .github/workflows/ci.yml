@@ -14,6 +14,8 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v1
       - name: Run Clippy
         run: nix develop .#clippy --command cargo clippy --all-targets --all-features
+      - name: Sccache stats
+        run: nix develop .#clippy --command sccache --show-stats
   fmt:
     runs-on: ubuntu-latest
     steps:
