@@ -3,6 +3,7 @@ on:
   push:
 env:
   RUST_BACKTRACE: "1"
+name: "ci"
 jobs:
   clippy_check:
     runs-on: ubuntu-latest
