@@ -29,27 +29,23 @@
           nativeBuildInputs = with pkgs; [cargo rustfmt];
         };
 
+        devShells.clippy = pkgs.mkShell {
+          nativeBuildInputs = with pkgs; [
+            rustc
+            cargo
+            sccache
+            clippy
+          ];
+        };
+
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
             rustc
             cargo
             rustfmt
-            nixpkgs-fmt
             sccache
             clippy
             rust-analyzer
-            bazel
-            bazel-watcher
-            cargo-outdated
-            pre-commit
-
-            # XXX: this doesn't quite let git operations work all the time,
-            # sometimes we get git smudge errors if `git-crypt` is not also
-            # installed in the host env
-            git-crypt
-          ] ++ lib.optional stdenv.isDarwin [
-            darwin.apple_sdk.frameworks.SystemConfiguration
-            iconv
           ];
 
           RUSTC_WRAPPER = "sccache";
