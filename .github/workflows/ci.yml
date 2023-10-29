@@ -36,6 +36,20 @@ jobs:
       - name: Build
         run: nix build
       # TODO: get `sccache` enabled here.
+  loom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v4
+      - name: Run the Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v1
+      - name: Build everything
+        run: nix develop --command cargo build --all-targets
+      - name: Run tests
+        run: nix develop --command cargo test --all-targets
+      - name: Run loom tests
+        run: nix develop --command ./loom.sh -- loom
   with-cargo:
     runs-on: ubuntu-latest
     strategy:
@@ -54,5 +68,3 @@ jobs:
           toolchain: ${{ matrix.rust_version}}
       - run: cargo build --all-targets
       - run: cargo test
-      - run: ./loom.sh -- loom
-
