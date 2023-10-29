@@ -1,11 +1,14 @@
 [package]
 name = "local-rcu"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = [ "Cody P Schafer <dev@codyps.com>"]
 license = "OSL-3.0"
 description = "RCU with a safe API and local collection of old values"
 readme = "README.md"
+homepage = "https://github.com/jmesmon/local-rcu"
+documentation = "https://docs.rs/local-rcu"
+repository = "https://github.com/jmesmon/local-rcu"
 
 [dependencies]
 slab = "0.4.9"
