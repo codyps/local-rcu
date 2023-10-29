@@ -1,6 +1,8 @@
 on:
   pull_request:
   push:
+env:
+  RUST_BACKTRACE: "1"
 jobs:
   clippy:
     runs-on: ubuntu-latest

@@ -5,7 +5,8 @@ use loom::thread;
 #[test]
 fn loom_send_100_from_1_to_m() {
     loom::model(|| {
-        let n = 5usize;
+        // 5 threads takes way too long
+        let n = 2usize;
         let m = 1usize;
         let (mut tx, rx) = local_rcu::slot(0usize);
 

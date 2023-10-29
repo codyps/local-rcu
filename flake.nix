@@ -20,6 +20,7 @@
       {
         packages.default = naersk'.buildPackage {
           src = ./.;
+          doCheck = true;
         };
 
         formatter = pkgs.nixpkgs-fmt;
