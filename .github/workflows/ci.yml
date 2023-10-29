@@ -34,8 +34,8 @@ jobs:
       - name: Run the Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v1
       - name: Build
-        run: |
-          nix build
+        run: nix build
+      # TODO: get `sccache` enabled here.
   with-cargo:
     runs-on: ubuntu-latest
     strategy:
