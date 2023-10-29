@@ -50,6 +50,8 @@ jobs:
         run: nix develop --command cargo test --all-targets
       - name: Run loom tests
         run: nix develop --command ./loom.sh -- loom
+      - name: Sccache stats
+        run: nix develop .#clippy --command sccache --show-stats
   with-cargo:
     runs-on: ubuntu-latest
     strategy:
