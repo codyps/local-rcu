@@ -24,7 +24,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run the Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v1
-      - run: nix-shell --pure --run "cargo fmt --check"
+      - run: nix develop .#fmt --command "cargo fmt --check"
   with-nix:
     runs-on: ubuntu-latest
     steps:

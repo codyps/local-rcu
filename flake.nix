@@ -25,7 +25,11 @@
 
         formatter = pkgs.nixpkgs-fmt;
 
-        devShell = pkgs.mkShell {
+        devShells.fmt = pkgs.mkShellNoCC {
+          nativeBuildInputs = with pkgs; [cargo rustfmt];
+        };
+
+        devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
             rustc
             cargo
