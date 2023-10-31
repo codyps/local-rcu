@@ -51,6 +51,11 @@ Compared to `local-rcu` ...:
 
 Compared to `local-rcu` ...:
 
+ - [`crossbeam-epoch`](https://crates.io/crates/crossbeam-epoch). Uses a global
+   shared garbage queue. Has a seperate `Guard` concept (like
+   `rcu_clean::graceful`) to allow lowering the cost of reads by delaying
+   garbage collection more. Includes `miri` based validation (along with
+   `loom`) 
  - [`rcu-clean`](https://crates.io/crates/rcu-clean). Does not include any
    tests using `loom` or other checking tool. Provides multiple mechanisms for
    freeing old values ("graceful": a seperated global Arc based method,
@@ -77,3 +82,7 @@ Compared to `local-rcu` ...:
    compare exchange. In other words: all readers and writers are performing
    compare exchange on a shared location, which may result in contention on the
    cache line containing the pointer.
+ - [`atom_box`](https://crates.io/crates/atom_box). Uses hazard pointers instead of RCU.
+ - [`urcu`](https://crates.io/crates/urcu).
+ - [`srcu`](https://crates.io/crates/srcu)
+ - [`keepcalm`](https://crates.io/crates/keepcalm) 
