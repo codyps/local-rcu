@@ -22,7 +22,7 @@ use loom::{
     sync::{atomic, Arc, Mutex},
     thread,
 };
-use std::{marker::PhantomData, ops::Deref};
+use std::{cell::UnsafeCell, marker::PhantomData, ops::Deref};
 #[cfg(not(loom))]
 use std::{
     sync::{atomic, Arc, Mutex},
@@ -42,10 +42,6 @@ pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
 /// in a mutex.
 pub struct Writer<T> {
     shared: Arc<Shared<T>>,
-    // we keep these as pointers because they may still be in use, and so
-    // freeing them (as would happen on drop by default) would be undefined behavior
-    #[allow(clippy::type_complexity)]
-    prevs: Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)>,
 }
 
 // If `T` is not Sync, we can't allow Writer (or Reader) to be sent to another thread, as `Writer`
@@ -53,7 +49,7 @@ pub struct Writer<T> {
 unsafe impl<T: Send + Sync> Send for Writer<T> {}
 
 impl<T> Drop for Writer<T> {
-    /// WARNING: this will spin until all readers have dropped their `ReadGuard`s to avoid leaking.
+    /// This will spin until all readers have dropped their `ReadGuard`s to avoid leaking.
     // Consider if we should provide a way to avoid this (and defer the collection of old values).
     fn drop(&mut self) {
         drop(self.sync());
@@ -64,19 +60,39 @@ struct Shared<T> {
     // to a Box<Value<T>>
     active: atomic::AtomicPtr<T>,
     epochs: Mutex<slab::Slab<Arc<atomic::AtomicUsize>>>,
+
+    // we keep these as pointers because they may still be in use, and so
+    // freeing them (as would happen on drop by default) would be undefined behavior
+    //
+    // Conceptually, this is a field in `Writer`. We place it in `Shared` to avoid having Writer
+    // dropping spin. Because `Shared` is in an `Arc`, by the time drop occurs all `Reader`s will
+    // have released their `ReadGuard`s, and we can safely drop the `Vec`.
+    #[allow(clippy::type_complexity)]
+    prevs: UnsafeCell<Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)>>,
 }
 
 impl<T> Writer<T> {
+    fn prevs(&self) -> &Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
+        // SAFETY: only this `Writer` can access `prevs`.
+        unsafe { &*self.shared.prevs.get() }
+    }
+
+    fn prevs_mut(&mut self) -> &mut Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
+        // SAFETY: only this `Writer` can access `prevs`.
+        unsafe { &mut *self.shared.prevs.get() }
+    }
+
+    /// Create a new `Writer` with an initial value
+    ///
+    /// The `Writer` can than be used to obtain one or more [`Reader`]s.
     pub fn new(init_val: Box<T>) -> Writer<T> {
         let shared = Arc::new(Shared {
             active: atomic::AtomicPtr::new(Box::into_raw(init_val)),
             epochs: Mutex::new(slab::Slab::new()),
+            prevs: UnsafeCell::new(Vec::new()),
         });
 
-        Writer {
-            shared,
-            prevs: Vec::new(),
-        }
+        Writer { shared }
     }
 
     /// Obtain a reader for the value stored by this writer
@@ -119,7 +135,7 @@ impl<T> Writer<T> {
     /// These may or may not still have readers that are still using them. If the readers for a
     /// particular value have moved on, those old values will be returned by `try_sync()`.
     pub fn has_old_values(&self) -> bool {
-        !self.prevs.is_empty()
+        !self.prevs().is_empty()
     }
 
     /// Check if we can release previous values and return them
@@ -132,7 +148,7 @@ impl<T> Writer<T> {
     pub fn try_sync(&mut self) -> Vec<Box<T>> {
         let mut v = Vec::new();
 
-        self.prevs.retain_mut(|(ptr, epochs)| {
+        self.prevs_mut().retain_mut(|(ptr, epochs)| {
             epochs.retain(|(prev, epoch)| {
                 let new = epoch.load(atomic::Ordering::Relaxed);
                 new == *prev
@@ -161,7 +177,7 @@ impl<T> Writer<T> {
     pub fn sync(&mut self) -> Vec<Box<T>> {
         let mut r = Vec::new();
 
-        while !self.prevs.is_empty() {
+        while !self.prevs().is_empty() {
             let v = self.try_sync();
             r.extend(v);
 
@@ -216,7 +232,7 @@ impl<T> Writer<T> {
             }
         }
 
-        self.prevs.push((prev, remaining_readers));
+        self.prevs_mut().push((prev, remaining_readers));
     }
 }
 
@@ -225,12 +241,14 @@ pub struct Reader<T> {
     shared: Arc<Shared<T>>,
     epoch: Arc<atomic::AtomicUsize>,
     epoch_index: usize,
+    // we'd like a phantom `&T` here, but that's not possible
     _marker: PhantomData<*const T>,
 }
 
 // SAFETY: if `T` is not `Sync` (ie: if it is a RefCell or has other non-thread safe mutability),
 // we can't send it between threads because we can't ensure that the reader won't mutate it.
 unsafe impl<T: Send + Sync> Send for Reader<T> {}
+unsafe impl<T: Send + Sync> Sync for Reader<T> {}
 
 impl<T> Clone for Reader<T> {
     fn clone(&self) -> Reader<T> {
