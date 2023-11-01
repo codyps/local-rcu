@@ -48,36 +48,29 @@ pub struct Writer<T> {
 // & `Reader` are essentially references.
 unsafe impl<T: Send + Sync> Send for Writer<T> {}
 
-impl<T> Drop for Writer<T> {
-    /// This will spin until all readers have dropped their `ReadGuard`s to avoid leaking.
-    // Consider if we should provide a way to avoid this (and defer the collection of old values).
-    fn drop(&mut self) {
-        drop(self.sync());
-    }
-}
-
 struct Shared<T> {
     // to a Box<Value<T>>
     active: atomic::AtomicPtr<T>,
     epochs: Mutex<slab::Slab<Arc<atomic::AtomicUsize>>>,
 
-    // we keep these as pointers because they may still be in use, and so
-    // freeing them (as would happen on drop by default) would be undefined behavior
-    //
     // Conceptually, this is a field in `Writer`. We place it in `Shared` to avoid having Writer
     // dropping spin. Because `Shared` is in an `Arc`, by the time drop occurs all `Reader`s will
     // have released their `ReadGuard`s, and we can safely drop the `Vec`.
+    //
+    // Modifying the content of the `Box<T>` is not permitted until all readers have dropped their
+    // references to the `Box<T>`. This is enforced by the `ReadGuard`'s lifetime & the epoch
+    // count.
     #[allow(clippy::type_complexity)]
-    prevs: UnsafeCell<Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)>>,
+    prevs: UnsafeCell<Vec<(Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>)>>,
 }
 
 impl<T> Writer<T> {
-    fn prevs(&self) -> &Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
+    fn prevs(&self) -> &Vec<(Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
         // SAFETY: only this `Writer` can access `prevs`.
         unsafe { &*self.shared.prevs.get() }
     }
 
-    fn prevs_mut(&mut self) -> &mut Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
+    fn prevs_mut(&mut self) -> &mut Vec<(Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
         // SAFETY: only this `Writer` can access `prevs`.
         unsafe { &mut *self.shared.prevs.get() }
     }
@@ -148,7 +141,14 @@ impl<T> Writer<T> {
     pub fn try_sync(&mut self) -> Vec<Box<T>> {
         let mut v = Vec::new();
 
-        self.prevs_mut().retain_mut(|(ptr, epochs)| {
+        // We need to move `val` out of `prevs` and into `v`. `extract_if` would work.
+        // `retain_mut` doesn't unless we play some unsafe games with pointers in `prev`.
+        //
+        // FIXME: switch to `extract_if` once it's stable.
+
+        let mut i = 0;
+        while i < self.prevs().len() {
+            let epochs = &mut self.prevs_mut()[i].1;
             epochs.retain(|(prev, epoch)| {
                 let new = epoch.load(atomic::Ordering::Relaxed);
                 new == *prev
@@ -161,12 +161,11 @@ impl<T> Writer<T> {
                 // SAFETY: no readers are left (because all have moved to a new
                 // epoch). We're removing it from `self.prevs` too, so there
                 // won't be another `Box` created for this pointer.
-                v.push(unsafe { Box::from_raw(*ptr) });
-                false
+                v.push(self.prevs_mut().remove(i).0);
             } else {
-                true
+                i += 1;
             }
-        });
+        }
 
         v
     }
@@ -232,7 +231,8 @@ impl<T> Writer<T> {
             }
         }
 
-        self.prevs_mut().push((prev, remaining_readers));
+        self.prevs_mut()
+            .push((unsafe { Box::from_raw(prev) }, remaining_readers));
     }
 }
 
