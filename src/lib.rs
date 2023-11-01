@@ -47,6 +47,7 @@ pub struct Writer<T> {
 // If `T` is not Sync, we can't allow Writer (or Reader) to be sent to another thread, as `Writer`
 // & `Reader` are essentially references.
 unsafe impl<T: Send + Sync> Send for Writer<T> {}
+unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 
 struct Shared<T> {
     // to a Box<Value<T>>
@@ -241,7 +242,7 @@ pub struct Reader<T> {
     shared: Arc<Shared<T>>,
     epoch: Arc<atomic::AtomicUsize>,
     epoch_index: usize,
-    // we'd like a phantom `&T` here, but that's not possible
+    // pointer used so we get !Send/!Sync without the `unsafe impl`s below.
     _marker: PhantomData<*const T>,
 }
 
