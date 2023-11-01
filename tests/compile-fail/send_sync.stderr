@@ -1,0 +1,21 @@
+error[E0277]: `RefCell<i32>` cannot be shared between threads safely
+  --> tests/compile-fail/send_sync.rs:10:28
+   |
+10 |       let t1 = thread::spawn(move || {
+   |  ______________-------------_^
+   | |              |
+   | |              required by a bound introduced by this call
+11 | |         *r1.read().borrow_mut() = 1;
+12 | |     });
+   | |_____^ `RefCell<i32>` cannot be shared between threads safely
+   |
+   = help: the trait `Sync` is not implemented for `RefCell<i32>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
+   = note: required for `Reader<RefCell<i32>>` to implement `Send`
+note: required because it's used within this closure
+  --> tests/compile-fail/send_sync.rs:10:28
+   |
+10 |     let t1 = thread::spawn(move || {
+   |                            ^^^^^^^
+note: required by a bound in `spawn`
+  --> /build/rustc-1.72.1-src/library/std/src/thread/mod.rs:680:1

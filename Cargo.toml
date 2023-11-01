@@ -17,6 +17,7 @@ slab = "0.4.9"
 loom = { version = "0.7.1", features = [ "checkpoint" ] }
 
 [dev-dependencies]
+trybuild = "1.0.85"
 criterion = { version = "0.5.1" }
 
 [[bench]]
@@ -25,3 +26,4 @@ harness = false
 
 [profile.release]
 debug = true
+

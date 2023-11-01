@@ -7,7 +7,7 @@
 //! No atomic exchange, compare-and-swap, math operations are used, only loads &
 //! stores (most relaxed, with an Acquire in the reader (per read) and a Release in the
 //! writer (per write)).
-//!  
+//!
 //! - Reading wait free: only atomics are loads & stores. 1 atomic relaxed rmw
 //!   of no-contention data (only 1 writer), 1 atomic Acquire load of shared data.
 //! - Writing aquires an internal mutex to scan for old values to retire. Using
@@ -17,13 +17,12 @@
 //!   values are automatically examined to determine if they may still be in use
 //!   by a reader. If they are definitely not in use by a reader, the old values
 //!   are returned.
-//!
 #[cfg(loom)]
 use loom::{
     sync::{atomic, Arc, Mutex},
     thread,
 };
-use std::ops::Deref;
+use std::{marker::PhantomData, ops::Deref};
 #[cfg(not(loom))]
 use std::{
     sync::{atomic, Arc, Mutex},
@@ -49,7 +48,9 @@ pub struct Writer<T> {
     prevs: Vec<(*mut T, Vec<(usize, Arc<atomic::AtomicUsize>)>)>,
 }
 
-unsafe impl<T: Send> Send for Writer<T> {}
+// If `T` is not Sync, we can't allow Writer (or Reader) to be sent to another thread, as `Writer`
+// & `Reader` are essentially references.
+unsafe impl<T: Send + Sync> Send for Writer<T> {}
 
 impl<T> Drop for Writer<T> {
     /// WARNING: this will spin until all readers have dropped their `ReadGuard`s to avoid leaking.
@@ -224,7 +225,12 @@ pub struct Reader<T> {
     shared: Arc<Shared<T>>,
     epoch: Arc<atomic::AtomicUsize>,
     epoch_index: usize,
+    _marker: PhantomData<*const T>,
 }
+
+// SAFETY: if `T` is not `Sync` (ie: if it is a RefCell or has other non-thread safe mutability),
+// we can't send it between threads because we can't ensure that the reader won't mutate it.
+unsafe impl<T: Send + Sync> Send for Reader<T> {}
 
 impl<T> Clone for Reader<T> {
     fn clone(&self) -> Reader<T> {
@@ -241,6 +247,7 @@ impl<T> Reader<T> {
             shared,
             epoch,
             epoch_index,
+            _marker: PhantomData,
         }
     }
 
