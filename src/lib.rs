@@ -65,6 +65,15 @@ struct Shared<T> {
     prevs: UnsafeCell<Vec<(Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>)>>,
 }
 
+impl<T> Drop for Shared<T> {
+    fn drop(&mut self) {
+        // SAFETY: no other references to `self` can exist at this point, if we've gotten this far
+        // all the refs to `self.active` have been dropped because the refcount on the inner Arc
+        // has dropped.
+        drop(unsafe { Box::from_raw(self.active.load(atomic::Ordering::Relaxed)) })
+    }
+}
+
 impl<T> Writer<T> {
     fn prevs(&self) -> &Vec<(Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
         // SAFETY: only this `Writer` can access `prevs`.
