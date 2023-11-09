@@ -49,7 +49,7 @@ jobs:
       - name: Run the Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v2
       - name: Build
-        run: nix build
+        run: nix build .#default
       # TODO: get `sccache` enabled here.
   loom:
     runs-on: ubuntu-latest

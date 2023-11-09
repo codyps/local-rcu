@@ -2,25 +2,37 @@
   inputs = {
     nixpkgs.url = "nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    naersk = {
-      url = "github:nix-community/naersk";
+    crane = {
+      url = "github:ipetkov/crane";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, flake-utils, naersk, nixpkgs }:
+  outputs = { self, flake-utils, crane, nixpkgs }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = ((import nixpkgs) {
           inherit system;
         });
 
-        naersk' = pkgs.callPackage naersk { };
+        craneLib = crane.lib.${system};
+
+        src = craneLib.cleanCargoSource (craneLib.path ./.);
       in
       {
-        packages.default = naersk'.buildPackage {
-          src = ./.;
+        packages.default = craneLib.buildPackage {
+          inherit src;
           doCheck = true;
+        };
+
+        packages.default-ci = craneLib.buildPackage {
+          inherit src;
+          doCheck = true;
+
+          RUSTC_WRAPPER = "sccache";
+          nativeBuildInputs = with pkgs; [
+            sccache
+          ];
         };
 
         formatter = pkgs.nixpkgs-fmt;
