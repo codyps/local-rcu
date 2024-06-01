@@ -14,6 +14,8 @@
         pkgs = ((import nixpkgs) {
           inherit system;
         });
+        lib = pkgs.lib;
+        stdenv = pkgs.stdenv;
 
         craneLib = crane.lib.${system};
 
@@ -58,6 +60,8 @@
             sccache
             clippy
             rust-analyzer
+          ] ++ lib.optional stdenv.isDarwin [
+            iconv
           ];
 
           RUSTC_WRAPPER = "sccache";
