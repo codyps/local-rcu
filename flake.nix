@@ -17,9 +17,19 @@
         lib = pkgs.lib;
         stdenv = pkgs.stdenv;
 
-        craneLib = crane.lib.${system};
+        craneLib = (crane.mkLib nixpkgs.legacyPackages.${system});
 
-        src = craneLib.cleanCargoSource (craneLib.path ./.);
+        #src = craneLib.cleanCargoSource (craneLib.path ./.);
+        src = let
+          # Only keeps stderr (try-build) files
+          stderrFilter = path: _type: builtins.match ".*\\.stderr$" path != null;
+          stderrOrCargo = path: type:
+            (stderrFilter path type) || (craneLib.filterCargoSources path type);
+        in
+          lib.cleanSourceWith {
+            src = craneLib.path ./.;
+            filter = stderrOrCargo;
+          };
       in
       {
         packages.default = craneLib.buildPackage {
