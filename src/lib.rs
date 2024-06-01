@@ -206,10 +206,12 @@ impl<T> Writer<T> {
 
         while !self.prevs().is_empty() {
             let v = self.try_sync();
-            r.extend(v);
-
-            // TODO: consider if we should skip yielding a bit initially
-            thread::yield_now();
+            if v.is_empty() {
+                // TODO: consider if there's a better way to choose how to yield
+                thread::yield_now();
+            } else {
+                r.extend(v);
+            }
         }
 
         r
