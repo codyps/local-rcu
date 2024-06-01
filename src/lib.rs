@@ -266,7 +266,7 @@ impl<T> Writer<T> {
     }
 }
 
-/// Something which can read the value, use `[Writer::reader]` to get one
+/// Something which can read the value, use `[Writer::reader]` to get one, or clone an existing `Reader`
 pub struct Reader<T> {
     shared: Arc<Shared<T>>,
     epoch: Arc<atomic::AtomicUsize>,
@@ -358,6 +358,8 @@ impl<T> Drop for Reader<T> {
 /// Allows access to the underlying value
 ///
 /// If this is leaked, the value it points to will also leak.
+///
+/// This represents a particular version of the value.
 pub struct ReadGuard<'a, T> {
     reader: &'a mut Reader<T>,
     data: &'a T,
