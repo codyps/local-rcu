@@ -50,10 +50,28 @@ unsafe impl<T: Send + Sync> Send for Writer<T> {}
 unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 
 struct Shared<T> {
-    // to a Box<Value<T>>
+    /// Value that readers are expected to read at this time.
+    ///
+    /// Is really a `Box<T>`, we need `AtomicPtr` so we can load/store it.
     active: atomic::AtomicPtr<T>,
+
+    /// An array of epochs, one per reader.
+    ///
+    /// references to each reader's epoch exist:
+    ///  - one here
+    ///  - one in the `Reader` itself
+    ///  - zero or more in `prevs`
+    ///
+    /// Readers track their index in the slab and use it to remove themselves when they're dropped.
+    ///
+    /// This is locked when a new reader is created, and when a writer is writing a new value.
+    /// Contention is limited as long as we don't create readers too often and/or don't write new
+    /// values too often.
     epochs: Mutex<slab::Slab<Arc<atomic::AtomicUsize>>>,
 
+    /// Previous active values along with a vec of readers, each with a snapshot of the epoch at
+    /// the time _after_ the previous active value was made inactive and a reference to the
+    /// reader's epoch counter so we can determine what epoch that reader is at now.
     // Conceptually, this is a field in `Writer`. We place it in `Shared` to avoid having Writer
     // dropping spin. Because `Shared` is in an `Arc`, by the time drop occurs all `Reader`s will
     // have released their `ReadGuard`s, and we can safely drop the `Vec`.
