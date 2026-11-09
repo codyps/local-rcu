@@ -46,6 +46,19 @@ Compared to `local-rcu` ...:
   supports multiple producers, provides some "history" (previous values) instead
   of only the most recent value, supports async waiting for new values, uses
   Mutexes internally.
+- [`arc-swap`](https://crates.io/crates/arc-swap): Atomically swappable `Arc`.
+  Every read hands out an owned `Arc` (refcount inc/dec per read) instead of a
+  borrow, so old values are freed as soon as the last reference drops (no grace
+  period, but no deferred-free bookkeeping either). Includes a thread-local
+  `Cache` to speed up repeated loads.
+- [`hazarc`](https://crates.io/crates/hazarc): Wait-free `AtomicArc` mixing
+  hazard pointers with atomic reference counting (explicitly inspired by
+  `arc-swap`), supports `no_std` and is validated with `loom` and `miri`.
+- [`aarc`](https://crates.io/crates/aarc): A family of atomically updatable
+  `Arc` types with different read/write trade-offs.
+- [`swmr-cell`](https://crates.io/crates/swmr-cell): Single-writer
+  multiple-reader cell with wait-free reads and version-based garbage
+  collection of old values.
 
 ## Compared to other rust "rcu" crates
 
@@ -69,7 +82,8 @@ Compared to `local-rcu` ...:
    readers aren't blocked by the writer. Internally uses a custom singly linked
    list to queue old values for freeing. In "arcrc", `clean()` must be called
    manually, no automatic cleaning exists. 
- - [`rcu_cell`](https://crates.io/crates/rcu_cell). Missing most documentation.
+ - [`rcu_cell`](https://crates.io/crates/rcu_cell). Docs have improved
+   considerably in recent releases.
    Uses atomic compare and exchange. Readers block writers (briefly, before a
    reference is incremented, a bit in the value pointer is used as a lock).
    Allows multiple writers (uses a compare and exchange determines which writer
@@ -83,6 +97,31 @@ Compared to `local-rcu` ...:
    compare exchange on a shared location, which may result in contention on the
    cache line containing the pointer.
  - [`atom_box`](https://crates.io/crates/atom_box). Uses hazard pointers instead of RCU.
- - [`urcu`](https://crates.io/crates/urcu).
- - [`srcu`](https://crates.io/crates/srcu)
- - [`keepcalm`](https://crates.io/crates/keepcalm) 
+ - [`ebr`](https://crates.io/crates/ebr). Simple epoch-based reclamation
+   with low cacheline ping-pong.
+ - [`seize`](https://crates.io/crates/seize). Fast, predictable memory
+   reclamation for concurrent data structures, hybridizing epoch and
+   hazard-pointer techniques.
+ - [`sdd`](https://crates.io/crates/sdd). Scalable lock-free delayed
+   deallocation: memory is not tracked per-object, but reclaimed wholesale
+   after a delay.
+ - [`haphazard`](https://crates.io/crates/haphazard). Hazard pointers,
+   a port of the implementation in facebook's `folly`.
+ - [`arcu`](https://crates.io/crates/arcu). Arc based RCU using a pool of
+   epoch counters to keep the read critical section short; replaced values
+   are dropped automatically once the last reference disappears.
+   Originated in [scryer-prolog](https://github.com/mthom/scryer-prolog/pull/1980).
+ - [`rcu_128`](https://crates.io/crates/rcu_128). Keeps the value pointer and
+   a tag in a single 128-bit atomic, providing wait-free reads without
+   reference counting. Requires platform support for 128-bit atomics.
+ - [`urcu`](https://crates.io/crates/urcu). Safe wrapper of the `memb`
+   variant of the userspace RCU library (liburcu).
+ - [`urcu2`](https://crates.io/crates/urcu2). A newer safe API to liburcu,
+   including qsbr flavors.
+ - [`read-copy-update`](https://crates.io/crates/read-copy-update). Provides a
+   read-copy-update "locking" primitive.
+ - [`rcurs`](https://crates.io/crates/rcurs). A small "oxidized" RCU
+   implementation.
+ - [`tokio_rcu`](https://crates.io/crates/tokio_rcu). RCU for async Rust with
+   tokio (new & small as of 2026).
+ - [`keepcalm`](https://crates.io/crates/keepcalm)
