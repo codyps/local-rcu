@@ -34,10 +34,6 @@ event-listener = "5.4.2"
 name = "b"
 harness = false
 
-[[bench]]
-name = "isolated"
-harness = false
-
 [profile.release]
 debug = true
 
