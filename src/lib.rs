@@ -241,7 +241,9 @@ impl<T> Writer<T> {
                 // ordered before the free, which would be a data race on the freed memory
                 // (allowed by the memory model on weakly ordered targets; not expressible by
                 // loom's interleaving model, so loom can't catch this).
-                epochs.get(*idx).is_some_and(|e| e.load(atomic::Ordering::Acquire) == *prev)
+                epochs
+                    .get(*idx)
+                    .is_some_and(|e| e.load(atomic::Ordering::Acquire) == *prev)
             });
 
             if tracked.is_empty() {
@@ -268,7 +270,11 @@ impl<T> Writer<T> {
         // Indices still referenced by any prevs entry must not be recycled (a `prevs` entry
         // re-checks the epoch later).
         let referenced: Vec<usize> = {
-            let mut r: Vec<usize> = state.prevs.iter().flat_map(|(_, t)| t.iter().map(|(i, _)| *i)).collect();
+            let mut r: Vec<usize> = state
+                .prevs
+                .iter()
+                .flat_map(|(_, t)| t.iter().map(|(i, _)| *i))
+                .collect();
             r.sort_unstable();
             r.dedup();
             r
@@ -278,7 +284,8 @@ impl<T> Writer<T> {
         for (idx, e) in epochs.iter() {
             // Acquire pairs with the `Release` store in `Reader::drop`: the reader's last access
             // to the epoch (and its `Arc`) happens-before we drop the `Arc` in the slab.
-            if e.load(atomic::Ordering::Acquire) == DEAD && !referenced.binary_search(&idx).is_ok() {
+            if e.load(atomic::Ordering::Acquire) == DEAD && !referenced.binary_search(&idx).is_ok()
+            {
                 to_remove.push(idx);
             }
         }
@@ -361,7 +368,9 @@ impl<T> Writer<T> {
             }
         }
 
-        state.prevs.push((unsafe { Box::from_raw(prev) }, remaining_readers));
+        state
+            .prevs
+            .push((unsafe { Box::from_raw(prev) }, remaining_readers));
     }
 }
 
@@ -500,7 +509,9 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         assert!(v & READER_FLAG != 0);
         // `Release` pairs with the writer's `Acquire` load in `Writer::try_sync()`: it orders
         // this read section's loads from the old value before the writer's free.
-        self.reader.epoch.store(v + READER_FLAG, atomic::Ordering::Release);
+        self.reader
+            .epoch
+            .store(v + READER_FLAG, atomic::Ordering::Release);
         // NOTE: adding a fence(SeqCst) here speeds up loom significantly,
         // implying not having it opens up many more execution variants. This
         // implies:
