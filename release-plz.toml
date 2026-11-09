@@ -1,8 +1,11 @@
 [workspace]
-changelog_update = false
+# generate/update CHANGELOG.md in the release PR (re-enabled; was disabled by
+# f2e9661 to keep the changelog out of the repo)
+changelog_update = true
 
 # workspace-internal crate: package the README's left-right recipe and
 # benchmark it against the real thing; never released
 [[package]]
 name = "local-rcu-left-right"
 release = false
+changelog_update = false
