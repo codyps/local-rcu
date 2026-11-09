@@ -95,6 +95,27 @@ fn bench_writer(c: &mut Criterion) {
         );
 
         group.bench_with_input(
+            BenchmarkId::new("local-rcu-left-right relaxed", format!("{readers} readers")),
+            &readers,
+            |b, _| {
+                let (mut w, r) = WriteHandle::<i64, AddOp>::new();
+                let _load = ReaderLoad::spawn(readers, || {
+                    let mut r = r.clone();
+                    move || {
+                        black_box(*r.enter());
+                    }
+                });
+                b.iter(|| {
+                    for _ in 0..APPENDS_PER_PUBLISH {
+                        w.append(AddOp(1));
+                    }
+                    // never blocks on readers; publishes a clone instead
+                    w.publish_relaxed();
+                });
+            },
+        );
+
+        group.bench_with_input(
             BenchmarkId::new("left-right", format!("{readers} readers")),
             &readers,
             |b, _| {

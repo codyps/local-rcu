@@ -72,6 +72,22 @@ fn many_publishes_without_appends() {
 }
 
 #[test]
+fn relaxed_publish_never_takes_the_working_copy_back() {
+    let (mut w, mut r) = WriteHandle::<Vec<u64>, Push>::new();
+    w.append(Push(1));
+    w.publish_relaxed();
+    assert_eq!(&**r.enter(), &[1]);
+    w.append(Push(2));
+    w.publish_relaxed();
+    assert_eq!(&**r.enter(), &[1, 2]);
+    // the working copy keeps accumulating without any rebasing
+    w.append(Push(3));
+    w.publish_relaxed();
+    assert_eq!(&**r.enter(), &[1, 2, 3]);
+    assert_eq!(w.read().len(), 3);
+}
+
+#[test]
 fn api_parity_with_left_right() {
     // the same sequence driven through the real left-right, for comparison
     use left_right::Absorb as LrAbsorb;

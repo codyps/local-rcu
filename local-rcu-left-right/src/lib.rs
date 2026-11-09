@@ -12,6 +12,11 @@
 //!   `publish()` does).
 //! * [`ReadHandle::enter()`] takes a wait-free read of the published copy.
 //!
+//! For comparison, [`WriteHandle::publish_relaxed()`] drops the left-right
+//! blocking discipline entirely: it publishes a clone of the working copy and
+//! never waits for readers (native `local-rcu` behavior — memory is bounded
+//! by what in-flight readers pin, at the cost of a `T: Clone` per publish).
+//!
 //! # Differences from the [`left-right`] crate
 //!
 //! * Reads are wait-free `local-rcu` reads (epoch store + acquire load);
@@ -178,6 +183,40 @@ where
             // the taken-back copy is a snapshot from one publish ago
             self.stale = true;
         }
+    }
+
+    /// Publish without ever blocking for readers.
+    ///
+    /// Instead of taking the working copy back from the writer (which waits
+    /// for readers to vacate it, as [`publish`](Self::publish) and
+    /// `left-right` do), this publishes a clone of the working copy and keeps
+    /// the working copy. Old snapshots that readers still examine are simply
+    /// retained by the writer (as in plain `local-rcu`): memory is bounded by
+    /// the values in-flight readers pin, rather than by blocking the writer.
+    ///
+    /// The trade: a `T: Clone` per publish, and — for large `T` — the clone
+    /// cost is proportional to the size of the value.
+    pub fn publish_relaxed(&mut self)
+    where
+        T: Clone,
+    {
+        // In consistent relaxed use the working copy is always in hand, so
+        // this never blocks. After a blocking `publish()` handed the working
+        // copy to the writer, this retrieves it and may block once — prefer
+        // using one publish flavor consistently.
+        self.ready();
+
+        let snapshot = self
+            .alternate
+            .as_deref()
+            .expect("ready() leaves an alternate")
+            .clone();
+        // `Writer::write()` never blocks: it hands back only values that no
+        // reader uses anymore, which we drop (the working copy is canonical).
+        drop(self.writer.write(Box::new(snapshot)));
+
+        // The published snapshot has every operation; nothing to rebase later.
+        self.log.clear();
     }
 
     /// Read the currently published value from the writer side (no lock, no
