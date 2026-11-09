@@ -51,6 +51,9 @@ jobs:
   with-cargo:
     runs-on: ubuntu-latest
     strategy:
+      # don't cancel sibling jobs on failure: one compiler mismatch
+      # shouldn't hide the results of the others
+      fail-fast: false
       matrix:
         # keep in sync with the lockfile: dev-deps require >= 1.85
         # (edition2024), trybuild@1.0.122 declares rust-version 1.88
@@ -65,4 +68,13 @@ jobs:
         with:
           toolchain: ${{ matrix.rust_version}}
       - run: cargo build --all-targets
-      - run: cargo test
+      # the trybuild stderr file tracks one compiler's diagnostics; skip it
+      # on beta, where wording can drift between releases (it still runs on
+      # stable, 1.88.0, and in the loom job)
+      - name: Test
+        run: |
+          if [ "${{ matrix.rust_version }}" = beta ]; then
+            cargo test -- --skip compile_fail
+          else
+            cargo test
+          fi
