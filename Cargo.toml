@@ -16,6 +16,11 @@ slab = "0.4.9"
 [target.'cfg(loom)'.dependencies]
 loom = { version = "0.7.1", features = [ "checkpoint" ] }
 
+# when building with `--cfg loom`, event-listener's `loom` feature must be
+# enabled so its own `cfg(loom)` code paths have the loom crate available
+[target.'cfg(loom)'.dev-dependencies]
+event-listener = { version = "5.4", features = ["loom"] }
+
 [dev-dependencies]
 trybuild = "1.0.85"
 criterion = { version = "0.8.2" }
