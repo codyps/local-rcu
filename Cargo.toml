@@ -18,7 +18,7 @@ loom = { version = "0.7.1", features = [ "checkpoint" ] }
 
 [dev-dependencies]
 trybuild = "1.0.85"
-criterion = { version = "0.5.1" }
+criterion = { version = "0.8.2" }
 
 [[bench]]
 name = "b"

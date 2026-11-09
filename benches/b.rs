@@ -1,4 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+
+use std::hint::black_box;
 
 fn send_x_from_1_to_m(base: usize, n: usize, m: usize) {
     let (mut tx, rx) = local_rcu::slot(0usize);
