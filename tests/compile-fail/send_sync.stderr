@@ -9,7 +9,7 @@ error[E0277]: `RefCell<i32>` cannot be shared between threads safely
 20 | |     });
    | |_____^ `RefCell<i32>` cannot be shared between threads safely
    |
-   = help: the trait `Sync` is not implemented for `RefCell<i32>`, which is required by `{closure@$DIR/tests/compile-fail/send_sync.rs:18:20: 18:27}: Send`
+   = help: the trait `Sync` is not implemented for `RefCell<i32>`
    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
    = note: required for `Reader<RefCell<i32>>` to implement `Send`
 note: required because it's used within this closure
@@ -20,8 +20,8 @@ note: required because it's used within this closure
 note: required by a bound in `spawn`
   --> tests/compile-fail/send_sync.rs:10:19
    |
-8  | fn spawn<F>(f: F)
+ 8 | fn spawn<F>(f: F)
    |    ----- required by a bound in this function
-9  | where
+ 9 | where
 10 |     F: FnOnce() + Send + 'static,
    |                   ^^^^ required by this bound in `spawn`

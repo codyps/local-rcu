@@ -2,10 +2,7 @@
   inputs = {
     nixpkgs.url = "nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    crane = {
-      url = "github:ipetkov/crane";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs = { self, flake-utils, crane, nixpkgs }:
@@ -40,11 +37,6 @@
         packages.default-ci = craneLib.buildPackage {
           inherit src;
           doCheck = true;
-
-          RUSTC_WRAPPER = "sccache";
-          nativeBuildInputs = with pkgs; [
-            sccache
-          ];
         };
 
         formatter = pkgs.nixpkgs-fmt;
@@ -57,7 +49,6 @@
           nativeBuildInputs = with pkgs; [
             rustc
             cargo
-            sccache
             clippy
           ];
         };
@@ -67,14 +58,10 @@
             rustc
             cargo
             rustfmt
-            sccache
             clippy
             rust-analyzer
-          ] ++ lib.optional stdenv.isDarwin [
-            iconv
           ];
 
-          RUSTC_WRAPPER = "sccache";
           RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
         };
       }
