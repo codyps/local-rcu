@@ -307,7 +307,7 @@ impl<T> Reader<T> {
     /// This function is conceptually an `srcu_read_lock()` and a
     /// `srcu_dereference()`. The `drop` of the return value (`ReadGuard`) is
     /// conceptually a `srcu_read_unlock()`.
-    pub fn read(&mut self) -> ReadGuard<T> {
+    pub fn read(&mut self) -> ReadGuard<'_, T> {
         // We're using `Relaxed` because all the ordering needed comes from the `Acquire` on
         // `self.shared.active` below.
         //
