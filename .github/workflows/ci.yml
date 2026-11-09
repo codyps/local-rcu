@@ -13,6 +13,9 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: Run the Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          # we're not on FlakeHub; skip its opportunistic auth attempt
+          use-flakehub: false
       - name: Run Clippy
         run: nix develop .#clippy --command cargo clippy --all-targets --all-features
   fmt:
@@ -23,6 +26,9 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: Run the Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          # we're not on FlakeHub; skip its opportunistic auth attempt
+          use-flakehub: false
       - run: nix develop .#fmt --command cargo fmt --check
   with-nix:
     runs-on: ubuntu-latest
@@ -32,6 +38,9 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: Run the Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          # we're not on FlakeHub; skip its opportunistic auth attempt
+          use-flakehub: false
       - name: Build
         run: nix build .#default
   loom:
@@ -42,6 +51,9 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: Run the Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+        with:
+          # we're not on FlakeHub; skip its opportunistic auth attempt
+          use-flakehub: false
       - name: Build everything
         run: nix develop --command cargo build --all-targets
       - name: Run tests
@@ -68,13 +80,8 @@ jobs:
         with:
           toolchain: ${{ matrix.rust_version}}
       - run: cargo build --all-targets
-      # the trybuild stderr file tracks one compiler's diagnostics; skip it
-      # on beta, where wording can drift between releases (it still runs on
-      # stable, 1.88.0, and in the loom job)
-      - name: Test
-        run: |
-          if [ "${{ matrix.rust_version }}" = beta ]; then
-            cargo test -- --skip compile_fail
-          else
-            cargo test
-          fi
+      # the trybuild stderr file tracks a single compiler's diagnostics
+      # (validated in the loom job, which uses one nix-provided toolchain);
+      # rustup toolchains render some snippets slightly differently (and
+      # drift between releases), so skip that one test here
+      - run: cargo test -- --skip compile_fail
