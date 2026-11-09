@@ -26,7 +26,7 @@ fn loom_reader_dropped_while_tracked() {
 
         // writing again must retire the old values (the dropped reader can't be reading them
         // anymore) and recycle the dead reader's slab slot
-        let mut discarded = tx.write(Box::new(2));
+        let discarded = tx.write(Box::new(2));
         let mut vals: Vec<usize> = discarded.iter().map(|b| **b).collect();
         vals.sort_unstable();
         assert_eq!(vals, vec![0, 1]);
