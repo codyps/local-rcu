@@ -11,9 +11,7 @@ fn no_leak() {
         let g1 = r1.read();
         w.write(Box::new(vals[1].clone()));
         assert_eq!(
-            vals.iter()
-                .map(|v| Arc::strong_count(v))
-                .collect::<Vec<_>>(),
+            vals.iter().map(Arc::strong_count).collect::<Vec<_>>(),
             [2, 2, 1]
         );
         assert_eq!(**g1, 1);
@@ -22,18 +20,14 @@ fn no_leak() {
         let g2 = r2.read();
         w.write(Box::new(vals[2].clone()));
         assert_eq!(
-            vals.iter()
-                .map(|v| Arc::strong_count(v))
-                .collect::<Vec<_>>(),
+            vals.iter().map(Arc::strong_count).collect::<Vec<_>>(),
             [2, 2, 2]
         );
         assert_eq!(**g2, 2);
     }
 
     assert_eq!(
-        vals.iter()
-            .map(|v| Arc::strong_count(v))
-            .collect::<Vec<_>>(),
+        vals.iter().map(Arc::strong_count).collect::<Vec<_>>(),
         [1, 1, 1]
     );
 }

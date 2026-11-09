@@ -49,6 +49,11 @@ pub struct Writer<T> {
 unsafe impl<T: Send + Sync> Send for Writer<T> {}
 unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 
+/// A previous active value, along with a snapshot (per still-existing reader) of
+/// the epoch at the time the value was replaced, and a reference to that
+/// reader's epoch counter so we can determine what epoch the reader is at now.
+type PrevVal<T> = (Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>);
+
 struct Shared<T> {
     /// Value that readers are expected to read at this time.
     ///
@@ -79,8 +84,7 @@ struct Shared<T> {
     // Modifying the content of the `Box<T>` is not permitted until all readers have dropped their
     // references to the `Box<T>`. This is enforced by the `ReadGuard`'s lifetime & the epoch
     // count.
-    #[allow(clippy::type_complexity)]
-    prevs: UnsafeCell<Vec<(Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>)>>,
+    prevs: UnsafeCell<Vec<PrevVal<T>>>,
 }
 
 impl<T> Drop for Shared<T> {
@@ -93,12 +97,12 @@ impl<T> Drop for Shared<T> {
 }
 
 impl<T> Writer<T> {
-    fn prevs(&self) -> &Vec<(Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
+    fn prevs(&self) -> &Vec<PrevVal<T>> {
         // SAFETY: only this `Writer` can access `prevs`.
         unsafe { &*self.shared.prevs.get() }
     }
 
-    fn prevs_mut(&mut self) -> &mut Vec<(Box<T>, Vec<(usize, Arc<atomic::AtomicUsize>)>)> {
+    fn prevs_mut(&mut self) -> &mut Vec<PrevVal<T>> {
         // SAFETY: only this `Writer` can access `prevs`.
         unsafe { &mut *self.shared.prevs.get() }
     }

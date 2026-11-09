@@ -9,6 +9,10 @@ on:
     branches:
       - main
 
+# serialize release runs: parallel runs would race on changelog + tag creation
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
 jobs:
   release-plz:
     name: Release-plz
