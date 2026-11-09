@@ -68,6 +68,10 @@ jobs:
         run: nix develop --command cargo test --all-targets
       - name: Run loom tests
         run: nix develop --command ./loom.sh -- loom
+      - name: Run examples
+        run: |
+          nix develop --command cargo run --example left_right
+          nix develop --command cargo run --example watch
   with-cargo:
     runs-on: ubuntu-latest
     timeout-minutes: 15

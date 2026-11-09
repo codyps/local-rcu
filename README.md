@@ -12,6 +12,8 @@ readers examining them).
 
 ### `left-right`
 
+Example: [`examples/left_right.rs`](examples/left_right.rs)
+
 1. Call `local_rcu::Writer::sync()` before every `local_rcu::Writer::write()` call
 2. Modify the old value returned by `local_rcu::Writer::sync()` (ie: do your own
    `Absorb`) and pass it to the `Writer::write()` call.
@@ -21,6 +23,8 @@ to return the old value if it can. This means there will need to be extra code
 to track the "alternate" value that you'll be updating.
 
 ### `tokio::sync::watch`
+
+Example: [`examples/watch.rs`](examples/watch.rs)
 
 1. Pair an [`event-listener`](https://crates.io/crates/event-listener) with a `local_rcu::Writer`
 2. Have each reader listen for events on `event-listener` to know to do another read.
