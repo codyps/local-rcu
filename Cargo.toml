@@ -1,3 +1,7 @@
+[workspace]
+members = ["local-rcu-left-right"]
+resolver = "2"
+
 [package]
 name = "local-rcu"
 version = "1.0.4"
@@ -28,6 +32,10 @@ event-listener = "5.4.2"
 
 [[bench]]
 name = "b"
+harness = false
+
+[[bench]]
+name = "isolated"
 harness = false
 
 [profile.release]

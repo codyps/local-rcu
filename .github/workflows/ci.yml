@@ -35,7 +35,7 @@ jobs:
       - name: rustfmt
         run: nix develop .#fmt --command cargo fmt --check
       - name: clippy
-        run: nix develop .#clippy --command cargo clippy --all-targets --all-features -- -D warnings
+        run: nix develop .#clippy --command cargo clippy --workspace --all-targets --all-features -- -D warnings
   with-nix:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -63,9 +63,9 @@ jobs:
           # we're not on FlakeHub; skip its opportunistic auth attempt
           use-flakehub: false
       - name: Build everything
-        run: nix develop --command cargo build --all-targets
+        run: nix develop --command cargo build --workspace --all-targets
       - name: Run tests
-        run: nix develop --command cargo test --all-targets
+        run: nix develop --command cargo test --workspace --all-targets
       - name: Run loom tests
         run: nix develop --command ./loom.sh -- loom
       - name: Run examples
@@ -92,9 +92,9 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master@2026-10-16
         with:
           toolchain: ${{ matrix.rust_version}}
-      - run: cargo build --all-targets
+      - run: cargo build --workspace --all-targets
       # the trybuild stderr file tracks a single compiler's diagnostics
       # (validated in the loom job, which uses one nix-provided toolchain);
       # rustup toolchains render some snippets slightly differently (and
       # drift between releases), so skip that one test here
-      - run: cargo test -- --skip compile_fail
+      - run: cargo test --workspace -- --skip compile_fail

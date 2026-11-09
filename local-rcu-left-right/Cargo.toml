@@ -1,0 +1,21 @@
+[package]
+name = "local-rcu-left-right"
+version = "0.1.0"
+edition = "2021"
+license = "OSL-3.0"
+description = "left-right style double buffering on top of local-rcu (workspace-internal, not published)"
+# this crate exists to package the README recipe and benchmark it against the
+# real `left-right`; it must not be published
+publish = false
+
+[dependencies]
+local-rcu = { path = ".." }
+
+[dev-dependencies]
+# benchmark opponent (also used by tests to check API parity)
+left-right = "0.11"
+criterion = "0.8"
+
+[[bench]]
+name = "vs_left_right"
+harness = false
