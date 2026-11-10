@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6](https://github.com/codyps/local-rcu/compare/v1.0.5...v1.0.6) - 2026-11-10
+
+### Other
+
+- publish to crates.io via trusted publishing ([#10](https://github.com/codyps/local-rcu/pull/10))
+- update repo urls after the jmesmon -> codyps move ([#9](https://github.com/codyps/local-rcu/pull/9))
+- document and test that the final value may be missed
+- add opt-in writer-drop detection (local_rcu::closing)
+- add ReadGuard::map / try_map (MappedReadGuard)
+
 ## [1.0.5](https://github.com/codyps/local-rcu/compare/v1.0.4...v1.0.5) - 2026-11-10
 
 ### Fixed
