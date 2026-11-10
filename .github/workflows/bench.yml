@@ -1,0 +1,92 @@
+name: bench
+
+# Compare benchmark results between two refs (eg to measure the effect of a
+# change). Runs the criterion benches (`benches/b.rs`) with a saved baseline,
+# and the throughput-table harness (`benches/isolated.rs`), on both commits,
+# then writes the results to the job summary.
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: "baseline ref (without the change)"
+        required: true
+        default: "dfc51d8"
+      candidate:
+        description: "candidate ref (with the change)"
+        required: true
+        default: "main"
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  bench:
+    name: bench-${{ matrix.arch }}
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 45
+    strategy:
+      # want numbers from both arches even if one fails
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+    env:
+      BASELINE: ${{ inputs.baseline }}
+      CANDIDATE: ${{ inputs.candidate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # need to be able to check out both refs
+          fetch-depth: 0
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master@2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # both refs are built in this job
+          key: bench-${{ matrix.arch }}
+
+      - name: Bench baseline (${{ inputs.baseline }})
+        run: |
+          git checkout --detach "$BASELINE"
+          cargo bench --bench b -- --save-baseline base | tee baseline-criterion.txt
+          # throughput tables: 3 passes to bound runner noise (take the best per config)
+          : > baseline-isolated.txt
+          for _ in 1 2 3; do
+            cargo bench --bench isolated | tee -a baseline-isolated.txt
+          done
+
+      - name: Bench candidate (${{ inputs.candidate }})
+        run: |
+          git checkout --detach "$CANDIDATE"
+          cargo bench --bench b -- --baseline base | tee candidate-criterion.txt
+          : > candidate-isolated.txt
+          for _ in 1 2 3; do
+            cargo bench --bench isolated | tee -a candidate-isolated.txt
+          done
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "# bench: \`$BASELINE\` (baseline) → \`$CANDIDATE\` (candidate) — ${{ matrix.arch }}"
+            echo
+            echo '```'
+            rustc -vV | grep -E '^(host|release)'
+            echo
+            echo "## criterion — candidate vs baseline (change %)"
+            cat candidate-criterion.txt
+            echo
+            echo "## isolated throughput — baseline (3 passes)"
+            grep -E '^(reader|writer)' baseline-isolated.txt
+            echo
+            echo "## isolated throughput — candidate (3 passes)"
+            grep -E '^(reader|writer)' candidate-isolated.txt
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
