@@ -10,9 +10,9 @@ authors = [ "Cody P Schafer <dev@codyps.com>"]
 license = "OSL-3.0"
 description = "RCU with a safe API and local collection of old values"
 readme = "README.md"
-homepage = "https://github.com/jmesmon/local-rcu"
+homepage = "https://github.com/codyps/local-rcu"
 documentation = "https://docs.rs/local-rcu"
-repository = "https://github.com/jmesmon/local-rcu"
+repository = "https://github.com/codyps/local-rcu"
 
 [dependencies]
 slab = "0.4.9"
