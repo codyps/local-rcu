@@ -1,0 +1,131 @@
+name: bench-history
+
+# Record benchmark results for every commit of main and publish a GitHub
+# Pages site showing them over time.
+#
+# - the bench jobs run both bench targets on x86_64 and aarch64, parse the
+#   output into one JSON record per (commit, arch), and append it as
+#   `data/<commit>.json` to that arch's *orphan* data branch
+#   (`bench-data-x86_64` / `bench-data-aarch64`: no shared history with
+#   main, one small file per recorded run).
+# - the pages job regenerates a static Chart.js site from all recorded
+#   data and publishes it to the orphan `gh-pages` branch (GitHub Pages
+#   serves from there).
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    # weekly drift sample of the current head of main
+    - cron: "23 5 * * 0"
+
+# data + site branches are pushed with the workflow token
+permissions:
+  contents: write
+
+# avoid overlapping runs racing on the gh-pages push; superseded runs are
+# cancelled (their commit is superseded anyway)
+concurrency:
+  group: bench-history-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  bench:
+    name: record-${{ matrix.arch }}
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+            branch: bench-data-x86_64
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+            branch: bench-data-aarch64
+    env:
+      BRANCH: ${{ matrix.branch }}
+      ARCH: ${{ matrix.arch }}
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master@2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: bench-history-${{ matrix.arch }}
+
+      - name: Run benchmarks
+        run: |
+          cargo bench --bench b | tee criterion.txt
+          cargo bench --bench isolated | tee isolated.txt
+
+      - name: Parse results
+        run: |
+          COMMIT_SHA="$SHA" \
+          COMMIT_DATE="$(git show -s --format=%cI HEAD)" \
+            python3 .github/scripts/bench_parse.py \
+              criterion.txt isolated.txt "record-$ARCH.json" "$ARCH"
+
+      - name: Append record to the orphan data branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch --depth=1 origin "$BRANCH"; then
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout --orphan "$BRANCH"
+            git rm -rf .
+          fi
+          mkdir -p data
+          cp "record-$ARCH.json" "data/$SHA.json"
+          git add data
+          git commit -m "bench: $ARCH $SHA"
+          git push origin "$BRANCH"
+
+  pages:
+    needs: bench
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Collect recorded data
+        run: |
+          git fetch --depth=1 origin bench-data-x86_64 bench-data-aarch64
+          mkdir -p data-x86_64 data-aarch64
+          for f in $(git ls-tree -r --name-only origin/bench-data-x86_64 -- data); do
+            git show "origin/bench-data-x86_64:$f" > "data-x86_64/$(basename "$f")"
+          done
+          for f in $(git ls-tree -r --name-only origin/bench-data-aarch64 -- data); do
+            git show "origin/bench-data-aarch64:$f" > "data-aarch64/$(basename "$f")"
+          done
+      - name: Generate site
+        run: |
+          mkdir -p site
+          python3 .github/scripts/gen_pages.py site/index.html data-x86_64 data-aarch64
+      - name: Publish to the orphan gh-pages branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch --depth=1 origin gh-pages; then
+            git checkout -B gh-pages origin/gh-pages
+          else
+            git checkout --orphan gh-pages
+            git rm -rf .
+          fi
+          # .git survives `rm -rf ./*` (dot entries are not globbed)
+          rm -rf ./*
+          cp -r site/* ./
+          git add -A
+          git commit -m "pages: update for $SHA"
+          git push origin gh-pages
