@@ -54,6 +54,9 @@ Each time `Writer` is updated with `Writer::write` (or via explicit request like
 by the `Readers` is past the epoch of that reader when it was snapshotted. When a previous value has no more
 live readers, we drop the value.
 
+To avoid synchronization, we bias towards keeping values alive longer (which is fine and correct):
+ - When the `Writer` snapshots the epochs it has already published a new value, so some of the `Reader` epochs it reads may actually be reading the new value (ie: those readers already moved on). We still count them like they are reading the old value because the `Writer` can't tell.
+
 ## Alternatives:
 
 Compared to `local-rcu` ...:
