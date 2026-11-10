@@ -30,6 +30,30 @@ Example: [`examples/watch.rs`](examples/watch.rs)
 2. Have each reader listen for events on `event-listener` to know to do another read.
 3. Have the writer signal the `event-listener` **after** a new value is written with `local_rcu::Writer::write()`.
 
+## High Level Internal flow
+
+A `slot` is the shared data structure represented by a single `Writer` and one or more `Readers`. 
+A `Writer` is a struct that allows publishing new values (and also handles freeing old ones).
+A `Reader` is a struct which allows reading published values.
+
+For a given `slot`, there is state shared between the `Writer` and all its `Readers`. This shared
+state is `Arc`'d, and internally it contains a list of `Reader`-epochs (one per `Reader`) which is
+protected by a `Mutex`. `Arc` ref-count changes only occur when cloning/creating more `Readers`.
+Locking the epoch list occurs when creating more `Readers` and when the writer publishes a value.
+
+The `epoch` value modified by the `Reader` and read by the `Writer` is a `usize` which uses 1 bit
+to indicate that it is currently reading a value (sets it before reading), and counts up when it
+finishes a read. When the `Reader` itself is dropped, it sets the epoch to a `DEAD` sentinel value.
+
+When the `Writer` publishes a value, it exposes the new value in the shared data, and then snapshots
+all the `Reader` epochs and tracks the snapshot, the `Reader` itself (so we can later read its current epoch),
+and the previous value (so that it stays alive).
+
+Each time `Writer` is updated with `Writer::write` (or via explicit request like `Writer::try_sync()` or
+`Writer::sync()`), the `Writer` examines these previous values checking if the current `epoch` published
+by the `Readers` is past the epoch of that reader when it was snapshotted. When a previous value has no more
+live readers, we drop the value.
+
 ## Alternatives:
 
 Compared to `local-rcu` ...:
