@@ -72,6 +72,23 @@ jobs:
         run: |
           nix develop --command cargo run --example left_right
           nix develop --command cargo run --example watch
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master@2026-10-16
+        with:
+          toolchain: nightly
+          components: miri
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # skip `compile_fail` (trybuild): it drives external cargo/rustc processes,
+      # which miri cannot interpret (covered by the loom & with-cargo jobs).
+      # The loom tests are #[cfg(loom)]-gated and compile to nothing here: loom's
+      # interleaving model and miri's memory-model emulation check disjoint things
+      # (loom cannot express store-buffer staleness; miri cannot model check).
+      - run: cargo miri test --workspace -- --skip compile_fail
   with-cargo:
     runs-on: ubuntu-latest
     timeout-minutes: 15
