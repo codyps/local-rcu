@@ -44,7 +44,11 @@
 //! struct AddOp(i64);
 //!
 //! impl Absorb<AddOp> for i64 {
-//!     fn absorb(&mut self, op: AddOp) {
+//!     fn absorb_first(&mut self, op: &mut AddOp) {
+//!         *self = self.wrapping_add(op.0);
+//!     }
+//!
+//!     fn absorb_second(&mut self, op: AddOp) {
 //!         *self = self.wrapping_add(op.0);
 //!     }
 //! }
@@ -67,14 +71,35 @@ use local_rcu::closing::{ClosingReader, ClosingWriter};
 use local_rcu::ReadGuard;
 use std::marker::PhantomData;
 
-/// Apply an operation to one copy of the data structure.
+/// Apply operations to copies of the data structure.
 ///
-/// Operations must be deterministic: each is applied twice — once to the
-/// copy being written when [`WriteHandle::append`] is called, and again to
-/// the stale copy when it is taken back (rebased).
+/// Every operation is applied exactly twice: first to the copy being
+/// written ([`absorb_first`](Absorb::absorb_first) at
+/// [`WriteHandle::append`] time), and later to the stale copy that is taken
+/// back from the writer ([`absorb_second`](Absorb::absorb_second), at
+/// rebase time). Both applications must have the same effect: operations
+/// must be deterministic, or the two copies will diverge.
+///
+/// `absorb_first` receives the operation by mutable reference so that
+/// implementations can move values out of it (or, with a future aliasing
+/// mechanism, alias them into the copy); `absorb_second` then receives the
+/// (possibly emptied) operation by value. Implementations that need the
+/// value in _both_ copies must use `Copy`/`Clone` values, or share them
+/// some other way (this is what `left-right`'s `aliasing` module exists
+/// for).
 pub trait Absorb<O> {
-    /// Apply `op` to this copy.
-    fn absorb(&mut self, op: O);
+    /// Apply `op` to this copy for the first time.
+    ///
+    /// The operation is still owned by the operation log: values moved out
+    /// of `op` here will not be available to
+    /// [`absorb_second`](Absorb::absorb_second).
+    fn absorb_first(&mut self, op: &mut O);
+
+    /// Apply `op` to the second copy of the data structure.
+    ///
+    /// Takes ownership of the (possibly emptied) operation, as returned by
+    /// the operation log after [`absorb_first`](Absorb::absorb_first).
+    fn absorb_second(&mut self, op: O);
 }
 
 /// A clonable handle for reading the published value (like
@@ -141,7 +166,7 @@ impl<T: Default, O> WriteHandle<T, O> {
     }
 }
 
-impl<T, O: Clone> WriteHandle<T, O>
+impl<T, O> WriteHandle<T, O>
 where
     T: Absorb<O>,
 {
@@ -165,23 +190,29 @@ where
             // The alternate came back from the writer: it is a snapshot from
             // one `publish()` ago. Bring it up to date by re-applying the
             // operations that were absorbed into the copy published in its
-            // place — `left-right`'s oplog replay.
+            // place — `left-right`'s oplog replay. This is each operation's
+            // second application (`absorb_second`).
             let log = std::mem::take(&mut self.log);
             if let Some(alt) = self.alternate.as_deref_mut() {
                 for op in log {
-                    alt.absorb(op);
+                    alt.absorb_second(op);
                 }
             }
             self.stale = false;
         }
     }
 
-    /// Append an operation to the log, absorbing it into the non-published
-    /// copy. It is not visible to readers until [`publish`](Self::publish).
-    pub fn append(&mut self, op: O) {
+    /// Append an operation to the log, applying it to the non-published copy
+    /// (the operation's first application). It is not visible to readers
+    /// until [`publish`](Self::publish).
+    ///
+    /// The operation is not cloned: if it carries values that
+    /// [`Absorb::absorb_first`] moves out, the second application
+    /// ([`Absorb::absorb_second`]) will see the emptied operation.
+    pub fn append(&mut self, mut op: O) {
         self.ready();
         if let Some(alt) = self.alternate.as_deref_mut() {
-            alt.absorb(op.clone());
+            alt.absorb_first(&mut op);
         }
         self.log.push(op);
     }
@@ -210,6 +241,11 @@ where
     /// the working copy. Old snapshots that readers still examine are simply
     /// retained by the writer (as in plain `local-rcu`): memory is bounded by
     /// the values in-flight readers pin, rather than by blocking the writer.
+    ///
+    /// Note: the clone is of the working copy, which has only ever seen
+    /// [`absorb_first`](Absorb::absorb_first) applications. If the two absorb
+    /// phases differ in your implementation (as in an aliasing scheme), do
+    /// not use this method.
     ///
     /// The trade: a `T: Clone` per publish, and — for large `T` — the clone
     /// cost is proportional to the size of the value.

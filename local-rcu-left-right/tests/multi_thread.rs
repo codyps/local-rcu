@@ -8,7 +8,11 @@ use std::thread;
 struct Push(u64);
 
 impl Absorb<Push> for Vec<u64> {
-    fn absorb(&mut self, op: Push) {
+    fn absorb_first(&mut self, op: &mut Push) {
+        self.push(op.0);
+    }
+
+    fn absorb_second(&mut self, op: Push) {
         self.push(op.0);
     }
 }

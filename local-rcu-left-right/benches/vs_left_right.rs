@@ -13,7 +13,11 @@ use std::thread::JoinHandle;
 struct AddOp(i64);
 
 impl Absorb<AddOp> for i64 {
-    fn absorb(&mut self, op: AddOp) {
+    fn absorb_first(&mut self, op: &mut AddOp) {
+        *self = self.wrapping_add(op.0);
+    }
+
+    fn absorb_second(&mut self, op: AddOp) {
         *self = self.wrapping_add(op.0);
     }
 }
