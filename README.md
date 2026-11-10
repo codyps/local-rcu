@@ -43,7 +43,8 @@ Locking the epoch list occurs when creating more `Readers` and when the writer p
 
 The `epoch` value modified by the `Reader` and read by the `Writer` is a `usize` which uses 1 bit
 to indicate that it is currently reading a value (sets it before reading), and counts up when it
-finishes a read. When the `Reader` itself is dropped, it sets the epoch to a `DEAD` sentinel value.
+finishes a read. When the `Reader` itself is dropped, it sets the epoch to a `DEAD` sentinel value
+(which effectively occupies another bit of our usize)
 
 When the `Writer` publishes a value, it exposes the new value in the shared data, and then snapshots
 all the `Reader` epochs and tracks the snapshot, the `Reader` itself (so we can later read its current epoch),
@@ -56,6 +57,8 @@ live readers, we drop the value.
 
 To avoid synchronization, we bias towards keeping values alive longer (which is fine and correct):
  - When the `Writer` snapshots the epochs it has already published a new value, so some of the `Reader` epochs it reads may actually be reading the new value (ie: those readers already moved on). We still count them like they are reading the old value because the `Writer` can't tell.
+ - It's safe for the epoch to wrap around, we only check if some bits are set and for equality, we don't try to order it. If the epoch wraps around to the same value as a snapshot of the epoch we've taken previously, we'll just be treating the `Reader` as if it's still reading the value from when that snapshot was taken until the `Reader` epoch moves on. In other words: it keeps the previous value around slightly longer. If one is very unlucky and keeps hitting the same epoch every time the `Writer` examines it, we will end up keeping the previous value until we have a read that shows the `Reader` as on a different epoch (ie: so we know it has moved on).
+
 
 ## Alternatives:
 
