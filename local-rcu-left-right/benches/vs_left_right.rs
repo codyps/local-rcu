@@ -82,7 +82,7 @@ fn bench_writer(c: &mut Criterion) {
                 let _load = ReaderLoad::spawn(readers, || {
                     let mut r = r.clone();
                     move || {
-                        black_box(*r.enter());
+                        black_box(*r.enter().unwrap());
                     }
                 });
                 b.iter(|| {
@@ -102,7 +102,7 @@ fn bench_writer(c: &mut Criterion) {
                 let _load = ReaderLoad::spawn(readers, || {
                     let mut r = r.clone();
                     move || {
-                        black_box(*r.enter());
+                        black_box(*r.enter().unwrap());
                     }
                 });
                 b.iter(|| {
@@ -145,7 +145,7 @@ fn bench_read(c: &mut Criterion) {
     group.bench_function("local-rcu-left-right", |b| {
         let (_w, mut r) = WriteHandle::<i64, AddOp>::new();
         b.iter(|| {
-            black_box(*r.enter());
+            black_box(*r.enter().unwrap());
         });
     });
 

@@ -10,7 +10,9 @@
 //! * [`WriteHandle::publish()`] publishes the alternate, blocking until
 //!   readers have vacated the previously published copy (as `left-right`'s
 //!   `publish()` does).
-//! * [`ReadHandle::enter()`] takes a wait-free read of the published copy.
+//! * [`ReadHandle::enter()`] takes a wait-free read of the published copy,
+//!   returning `None` once the writer is dropped (like `left-right`'s
+//!   `enter()`).
 //!
 //! For comparison, [`WriteHandle::publish_relaxed()`] drops the left-right
 //! blocking discipline entirely: it publishes a clone of the working copy and
@@ -24,9 +26,10 @@
 //! * As in `left-right`, every operation is applied twice — once when
 //!   appended, and again when the stale copy is taken back and "rebased" —
 //!   so operations must be deterministic.
-//! * `left-right` signals writer drop (`enter()` returning `None`). Readers
-//!   here keep observing the last published value indefinitely; pair the
-//!   reader with `local_rcu::closing` if closure detection is needed.
+//! * Writer drop is signaled to readers (`enter()` returning `None`), as in
+//!   `left-right`. As with any closure, a reader may observe closure before
+//!   observing the final published operations; unlike `left-right`, the
+//!   backing data stays alive until readers drop it.
 //! * `left-right` hides the operation log and copy management entirely; this
 //!   crate is a thin layer so the moving parts stay visible.
 //! * This crate is **not published**; it mainly exists to benchmark the
@@ -47,17 +50,21 @@
 //! }
 //!
 //! let (mut w, mut r) = WriteHandle::<i64, AddOp>::new();
-//! assert_eq!(*r.enter(), 0);
+//! assert_eq!(*r.enter().unwrap(), 0);
 //! w.append(AddOp(1));
 //! // not published yet:
-//! assert_eq!(*r.enter(), 0);
+//! assert_eq!(*r.enter().unwrap(), 0);
 //! w.publish();
-//! assert_eq!(*r.enter(), 1);
+//! assert_eq!(*r.enter().unwrap(), 1);
+//! drop(w);
+//! // the writer is gone: no more values will be published
+//! assert!(r.enter().is_none());
 //! ```
 //!
 //! [`left-right`]: https://crates.io/crates/left-right
 
-use local_rcu::{ReadGuard, Reader, Writer};
+use local_rcu::closing::{ClosingReader, ClosingWriter};
+use local_rcu::ReadGuard;
 use std::marker::PhantomData;
 
 /// Apply an operation to one copy of the data structure.
@@ -73,7 +80,7 @@ pub trait Absorb<O> {
 /// A clonable handle for reading the published value (like
 /// `left_right::ReadHandle`).
 pub struct ReadHandle<T> {
-    reader: Reader<T>,
+    reader: ClosingReader<T>,
 }
 
 impl<T> Clone for ReadHandle<T> {
@@ -85,15 +92,24 @@ impl<T> Clone for ReadHandle<T> {
 }
 
 impl<T> ReadHandle<T> {
-    /// Wait-free read of the currently published value.
-    pub fn enter(&mut self) -> ReadGuard<'_, T> {
+    /// Wait-free read of the currently published value, or `None` if the
+    /// writer has been dropped (like `left_right::ReadHandle::enter`).
+    pub fn enter(&mut self) -> Option<ReadGuard<'_, T>> {
         self.reader.read()
+    }
+
+    /// Has the writer been dropped?
+    pub fn is_closed(&self) -> bool {
+        self.reader.is_closed()
     }
 }
 
 /// The (single) writer handle (like `left_right::WriteHandle`).
+///
+/// Dropping it signals to readers that no further values will be published
+/// (as dropping a `left_right::WriteHandle` does).
 pub struct WriteHandle<T, O> {
-    writer: Writer<T>,
+    writer: ClosingWriter<T>,
     /// The non-published copy that operations are absorbed into. `None` when
     /// the previously published copy has not been handed back yet.
     alternate: Option<Box<T>>,
@@ -111,7 +127,7 @@ impl<T: Default, O> WriteHandle<T, O> {
     /// Create a pair of handles over `T::default()`, mirroring
     /// `left_right::new()`.
     pub fn new() -> (WriteHandle<T, O>, ReadHandle<T>) {
-        let (writer, reader) = local_rcu::slot(T::default());
+        let (writer, reader) = local_rcu::closing::slot(T::default());
         (
             WriteHandle {
                 writer,

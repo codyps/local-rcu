@@ -27,8 +27,9 @@ fn readers_see_consistent_prefixes() {
             let mut r = r.clone();
             s.spawn(move || {
                 let mut last_len = 0usize;
-                loop {
-                    let g = r.enter();
+                // enter() also yields None once the writer drops; the writer
+                // here outlives the loop, so that only happens on success
+                while let Some(g) = r.enter() {
                     assert!(
                         g.len() >= last_len,
                         "log went backwards ({} < {})",
@@ -43,6 +44,7 @@ fn readers_see_consistent_prefixes() {
                         break;
                     }
                 }
+                assert_eq!(last_len, TOTAL as usize);
             });
         }
 
@@ -65,10 +67,10 @@ fn many_publishes_without_appends() {
     w.publish();
     w.publish();
     w.publish();
-    assert_eq!(&**r.enter(), &[1]);
+    assert_eq!(&**r.enter().unwrap(), &[1]);
     w.append(Push(2));
     w.publish();
-    assert_eq!(&**r.enter(), &[1, 2]);
+    assert_eq!(&**r.enter().unwrap(), &[1, 2]);
 }
 
 #[test]
@@ -76,15 +78,32 @@ fn relaxed_publish_never_takes_the_working_copy_back() {
     let (mut w, mut r) = WriteHandle::<Vec<u64>, Push>::new();
     w.append(Push(1));
     w.publish_relaxed();
-    assert_eq!(&**r.enter(), &[1]);
+    assert_eq!(&**r.enter().unwrap(), &[1]);
     w.append(Push(2));
     w.publish_relaxed();
-    assert_eq!(&**r.enter(), &[1, 2]);
+    assert_eq!(&**r.enter().unwrap(), &[1, 2]);
     // the working copy keeps accumulating without any rebasing
     w.append(Push(3));
     w.publish_relaxed();
-    assert_eq!(&**r.enter(), &[1, 2, 3]);
+    assert_eq!(&**r.enter().unwrap(), &[1, 2, 3]);
     assert_eq!(w.read().len(), 3);
+}
+
+#[test]
+fn writer_drop_signals_readers() {
+    let (mut w, mut r) = WriteHandle::<Vec<u64>, Push>::new();
+    let mut r2 = r.clone();
+
+    w.append(Push(1));
+    w.publish();
+    assert!(!r.is_closed());
+    assert_eq!(&**r.enter().unwrap(), &[1]);
+
+    // dropping the writer (or ending the scope owning it) closes the slot
+    drop(w);
+    assert!(r.is_closed());
+    assert!(r.enter().is_none());
+    assert!(r2.enter().is_none(), "cloned readers see closure too");
 }
 
 #[test]
@@ -119,5 +138,5 @@ fn api_parity_with_left_right() {
     w.append(Push(2));
     w.publish();
 
-    assert_eq!(&**r.enter(), &*lr.enter().unwrap());
+    assert_eq!(&**r.enter().unwrap(), &*lr.enter().unwrap());
 }
