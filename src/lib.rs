@@ -55,9 +55,8 @@ pub struct Writer<T> {
 unsafe impl<T: Send + Sync> Send for Writer<T> {}
 unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 
-/// A previous active value, along with a snapshot (per still-existing reader) of the epoch at the
-/// time the value was replaced, and the index of that reader's epoch counter (in `Shared::epochs`)
-/// so we can determine what epoch the reader is at now.
+/// Readers (as indices into `Shared::epochs`) that may still be able to reach a particular
+/// retired value.
 ///
 /// We track readers by slab index instead of cloning an `Arc` per tracked reader per write:
 /// - `Arc::clone`/`drop` are atomic RMWs on a cacheline the reader is actively writing (the epoch
@@ -65,9 +64,21 @@ unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 ///   and readers. Tracking by index keeps the reader's cacheline RMW-free for the writer's entire
 ///   lifetime of the slot.
 /// - It also avoids a per-write allocation when readers are busy reading.
-type TrackedReaders = Vec<(usize, usize)>;
+type TrackedReaders = Vec<usize>;
 
-type PrevVal<T> = (Box<T>, TrackedReaders);
+/// A retired value, kept as a raw pointer until it is collected.
+///
+/// The `Box` is deliberately not re-formed at retire time: creating a `Box` (or any `&mut`) from
+/// the pointer retags the allocation as exclusively owned, which is undefined behavior while
+/// readers may still be dereferencing the value through their `ReadGuard`s (a data race under
+/// Rust's aliasing model, detected by miri). `Writer::collect_prevs()` re-forms the `Box` only
+/// once no tracked reader can reach the value anymore.
+///
+/// The `usize` is the generation at which the value stopped being `active` (`superseded_at`, see
+/// `Shared::gen`): a reader whose published `floor` (see `ReaderSlot`) is at least this
+/// generation has provably observed a newer value and, by read-read coherence on `active`, can
+/// never load this value again — in a current or future read section.
+type PrevVal<T> = (*mut T, usize, TrackedReaders);
 
 /// State owned by the (single) writer. Kept in `Shared` (behind an `UnsafeCell`) so dropping it
 /// doesn't require the writer to be alive (see `Shared::prevs`).
@@ -77,9 +88,30 @@ struct WriterState<T> {
     /// Pool of empty tracking vecs, to avoid allocating one per write.
     pool: Vec<TrackedReaders>,
 
+    /// Writer-local mirror of `Shared::gen`: the generation of the value currently `active`.
+    /// Only the writer touches this; it is `Release`-published to `Shared::gen` on every
+    /// `publish()`.
+    gen: usize,
+
     /// Set when a `DEAD` epoch has been observed and the epoch slab needs a sweep to recycle
     /// dropped readers.
     saw_dead: bool,
+}
+
+impl<T> Drop for WriterState<T> {
+    fn drop(&mut self) {
+        // Free retired values that were never collected (eg the writer was dropped, or
+        // `write_nosync()` was used without a later `try_sync()`).
+        //
+        // SAFETY: `WriterState` is dropped only when the containing `Shared` is, which requires
+        // the `Arc` refcount held by every `Writer` and `Reader` to reach zero. Every
+        // `ReadGuard` borrows its `Reader`, so no guard (and no `&T` into these values) can
+        // exist by then, and the `Release`/`Acquire` ordering on the final `Arc` decrements
+        // makes the readers' last accesses happen-before this drop.
+        for (val, _, _) in &mut self.prevs {
+            drop(unsafe { Box::from_raw(*val) });
+        }
+    }
 }
 
 struct Shared<T> {
@@ -88,9 +120,15 @@ struct Shared<T> {
     /// Is really a `Box<T>`, we need `AtomicPtr` so we can load/store it.
     active: atomic::AtomicPtr<T>,
 
-    /// An array of epochs, one per reader.
+    /// Generation of the currently-`active` value: bumped by the writer on every `publish()` and
+    /// stored `Release`. Readers `Acquire`-load it immediately before loading `active` and
+    /// publish the result as their `floor` (see `ReaderSlot`), giving the writer a conservative,
+    /// monotonically advancing notion of how far each reader's observations have progressed.
+    gen: atomic::AtomicUsize,
+
+    /// The per-reader slots (one per reader).
     ///
-    /// references to each reader's epoch exist:
+    /// references to each slot exist:
     ///  - one here
     ///  - one in the `Reader` itself
     ///
@@ -101,18 +139,17 @@ struct Shared<T> {
     /// This is locked when a new reader is created, and when a writer is writing a new value.
     /// Contention is limited as long as we don't create readers too often and/or don't write new
     /// values too often.
-    epochs: Mutex<slab::Slab<Arc<atomic::AtomicUsize>>>,
+    epochs: Mutex<slab::Slab<Arc<ReaderSlot>>>,
 
-    /// Previous active values along with a vec of readers, each with a snapshot of the epoch at
-    /// the time _after_ the previous active value was made inactive and the index of the
-    /// reader's epoch counter so we can determine what epoch that reader is at now.
+    /// Previous active values along with a vec of readers that may still be able to reach them,
+    /// and the generation at which each was superseded (see `PrevVal`).
     // Conceptually, this is a field in `Writer`. We place it in `Shared` to avoid having Writer
     // dropping spin. Because `Shared` is in an `Arc`, by the time drop occurs all `Reader`s will
     // have released their `ReadGuard`s, and we can safely drop the `Vec`.
     //
-    // Modifying the content of the `Box<T>` is not permitted until all readers have dropped their
-    // references to the `Box<T>`. This is enforced by the `ReadGuard`'s lifetime & the epoch
-    // count.
+    // Modifying the content of the `Box<T>` is not permitted until all readers have provably
+    // observed a newer value (or are gone). This is enforced by the `ReadGuard`'s lifetime & the
+    // floor tracking.
     prevs: UnsafeCell<WriterState<T>>,
 }
 
@@ -123,6 +160,35 @@ impl<T> Drop for Shared<T> {
         // has dropped.
         drop(unsafe { Box::from_raw(self.active.load(atomic::Ordering::Relaxed)) })
     }
+}
+
+/// Per-reader state, published by the reader and examined by the writer.
+///
+/// `epoch` marks read-section entrance/exit (for the one-guard-at-a-time invariant) and reader
+/// liveness (`DEAD` when the reader is dropped).
+///
+/// `floor` is the generation of the last value this reader observed (see `Shared::gen`): on
+/// entering a read section, the reader loads `gen` immediately before loading `active` and
+/// publishes that generation here with `Release`.
+///
+/// The floor is what makes reclamation sound: because a thread's successive loads of `active`
+/// are ordered by read-read coherence — they can never go backwards in `active`'s modification
+/// order — a reader with `floor >= G` has observed the value published at generation `G` or
+/// newer, so
+///
+///  - its *past* accesses of any value superseded before `G` are ordered before the `Release`
+///    floor store (program order), which pairs with the writer's `Acquire` load, making them
+///    happen-before the free of those values, and
+///  - its *future* read sections can never load a value superseded before `G` again.
+///
+/// Without this, a reader that ends a section and starts a new one can have its new section's
+/// `active` load return an already-retired pointer (legal store-buffering behavior even for
+/// acquire loads), and the writer — which can't distinguish "reader moved on" from "reader came
+/// back to the old value" — would free the value mid-read (detected by miri; loom's
+/// interleaving model cannot express it).
+struct ReaderSlot {
+    epoch: atomic::AtomicUsize,
+    floor: atomic::AtomicUsize,
 }
 
 impl<T> Writer<T> {
@@ -147,10 +213,12 @@ impl<T> Writer<T> {
     pub fn new(init_val: Box<T>) -> Writer<T> {
         let shared = Arc::new(Shared {
             active: atomic::AtomicPtr::new(Box::into_raw(init_val)),
+            gen: atomic::AtomicUsize::new(0),
             epochs: Mutex::new(slab::Slab::new()),
             prevs: UnsafeCell::new(WriterState {
                 prevs: Vec::new(),
                 pool: Vec::new(),
+                gen: 0,
                 saw_dead: false,
             }),
         });
@@ -222,10 +290,10 @@ impl<T> Writer<T> {
         v
     }
 
-    /// Scan `prevs` for values whose readers have all moved on, collect them into `out`.
+    /// Scan `prevs` for values no reader can reach anymore, collect them into `out`.
     ///
     /// Requires `epochs` to be locked.
-    fn collect_prevs(&self, epochs: &slab::Slab<Arc<atomic::AtomicUsize>>, out: &mut Vec<Box<T>>) {
+    fn collect_prevs(&self, epochs: &slab::Slab<Arc<ReaderSlot>>, out: &mut Vec<Box<T>>) {
         // We need to move `val` out of `prevs` and into `v`. `extract_if` would work.
         // `retain_mut` doesn't unless we play some unsafe games with pointers in `prev`.
         //
@@ -234,24 +302,45 @@ impl<T> Writer<T> {
         let state = self.state_mut();
         let mut i = 0;
         while i < state.prevs.len() {
-            let tracked = &mut state.prevs[i].1;
-            tracked.retain(|(idx, prev)| {
-                // Acquire pairs with the `Release` stores in `ReadGuard::drop` and
-                // `Reader::drop`. Without it, the reader's loads from the old value are not
-                // ordered before the free, which would be a data race on the freed memory
-                // (allowed by the memory model on weakly ordered targets; not expressible by
-                // loom's interleaving model, so loom can't catch this).
-                epochs
-                    .get(*idx)
-                    .is_some_and(|e| e.load(atomic::Ordering::Acquire) == *prev)
+            let superseded_at = state.prevs[i].1;
+            let tracked = &mut state.prevs[i].2;
+            tracked.retain(|idx| {
+                // If the slab entry is gone the reader was dropped and swept (sweep only
+                // recycles entries no prevs entry refers to), so it cannot reach the value.
+                let Some(slot) = epochs.get(*idx) else {
+                    return false;
+                };
+
+                // `Acquire` pairs with the `Release` stores in `Reader::drop` (`DEAD`) and
+                // `Reader::read()` (`floor`): once we observe the reader is dead, or that its
+                // floor has reached `superseded_at`, every access it could ever have made to
+                // this value happens-before this load (and thus the free below), and — by
+                // read-read coherence on `active` — no future read section of that reader can
+                // load this value again.
+                //
+                // Staying tracked otherwise is conservative and sound: a reader that has not
+                // observed a newer generation can still be dereferencing this value in a live
+                // section, or reach it again in a later section (a stale `active` load can
+                // legally return the newly-retired pointer).
+                if slot.epoch.load(atomic::Ordering::Acquire) == DEAD {
+                    return false;
+                }
+                slot.floor.load(atomic::Ordering::Acquire) < superseded_at
             });
 
             if tracked.is_empty() {
-                let (val, mut t) = state.prevs.remove(i);
+                let (val, _, mut t) = state.prevs.remove(i);
                 // recycle the tracking vec's allocation
                 t.clear();
                 state.pool.push(t);
-                out.push(val);
+                // SAFETY: no live or future reader can reach `val`: every reader that could
+                // has been observed either dead, or with a floor at or past `superseded_at`
+                // (the `Acquire` loads above pair with the reader's `Release` stores), so
+                // their last access to the value happens-before this point and no guard
+                // referencing it can exist or be created. Re-forming (and later dropping) the
+                // `Box` here is therefore race-free; doing it any earlier (eg at retire time
+                // in `publish()`) would be UB (see `PrevVal`).
+                out.push(unsafe { Box::from_raw(val) });
             } else {
                 i += 1;
             }
@@ -261,19 +350,19 @@ impl<T> Writer<T> {
     /// Recycle epoch slab entries belonging to dropped readers.
     ///
     /// Requires `epochs` to be locked.
-    fn sweep_dead(state: &mut WriterState<T>, epochs: &mut slab::Slab<Arc<atomic::AtomicUsize>>) {
+    fn sweep_dead(state: &mut WriterState<T>, epochs: &mut slab::Slab<Arc<ReaderSlot>>) {
         if !state.saw_dead {
             return;
         }
         state.saw_dead = false;
 
         // Indices still referenced by any prevs entry must not be recycled (a `prevs` entry
-        // re-checks the epoch later).
+        // re-checks the reader later).
         let referenced: Vec<usize> = {
             let mut r: Vec<usize> = state
                 .prevs
                 .iter()
-                .flat_map(|(_, t)| t.iter().map(|(i, _)| *i))
+                .flat_map(|(_, _, t)| t.iter().copied())
                 .collect();
             r.sort_unstable();
             r.dedup();
@@ -281,10 +370,11 @@ impl<T> Writer<T> {
         };
 
         let mut to_remove = Vec::new();
-        for (idx, e) in epochs.iter() {
+        for (idx, slot) in epochs.iter() {
             // Acquire pairs with the `Release` store in `Reader::drop`: the reader's last access
             // to the epoch (and its `Arc`) happens-before we drop the `Arc` in the slab.
-            if e.load(atomic::Ordering::Acquire) == DEAD && !referenced.binary_search(&idx).is_ok()
+            if slot.epoch.load(atomic::Ordering::Acquire) == DEAD
+                && !referenced.binary_search(&idx).is_ok()
             {
                 to_remove.push(idx);
             }
@@ -322,25 +412,35 @@ impl<T> Writer<T> {
         self.publish(&epochs, val);
     }
 
-    /// Publish a new value and track readers of the value being replaced.
+    /// Publish a new value and track the readers that may still be able to reach the value being
+    /// replaced.
     ///
     /// Requires `epochs` to be locked.
-    fn publish(&self, epochs: &slab::Slab<Arc<atomic::AtomicUsize>>, val: Box<T>) {
+    fn publish(&self, epochs: &slab::Slab<Arc<ReaderSlot>>, val: Box<T>) {
         // We're the only writer, so `Relaxed` is fine. We avoid a `swap`
         // because that provides extra garuntees we don't need.
         let prev = self.shared.active.load(atomic::Ordering::Relaxed);
+
+        let state = self.state_mut();
+        state.gen += 1;
+        let gen = state.gen;
 
         // Half of a Release-Acquire pair, see `Reader::read()` for the `Acquire` half. `Release`
         // ensures that `val` is fully initialized before it is exposed to other threads.
         self.shared
             .active
             .store(Box::into_raw(val), atomic::Ordering::Release);
+        // The generation of the value just published (see `Shared::gen`). `Release` pairs with
+        // the reader's `Acquire` load: a reader that observes generation `gen` is guaranteed to
+        // subsequently observe at least the value published at `gen` when it loads `active`
+        // (both stores are `Release`, and the `active` store is sequenced before this one).
+        self.shared.gen.store(gen, atomic::Ordering::Release);
 
         // This fence (and its counterpart in `Reader::read()`) cannot be relaxed to `Acquire`
         // and/or `Release`: reader and writer form the store-buffering (SB) litmus pattern:
         //
         //   reader: store epoch (entry); ... ; load active
-        //   writer: store active;            ... ; load epochs
+        //   writer: store active;            ... ; load reader state
         //
         // With only Acquire/Release ordering, both sides may miss the other's store (each store
         // can sit in the local store buffer while the other's load executes), which would let the
@@ -348,36 +448,49 @@ impl<T> Writer<T> {
         // Participating in the SeqCst total order on both sides rules that out: whichever
         // side's SeqCst operation comes first in the total order forces the other side's load to
         // observe the preceding store.
+        //
+        // Note: reclamation soundness is carried by the floor tracking (see `ReaderSlot`), which
+        // does not depend on this fence: a stale scan can only err towards tracking more readers
+        // (conservative). The fence is kept as defense in depth for the scan's epoch/DEAD
+        // handling.
         atomic::fence(atomic::Ordering::SeqCst);
 
-        // add `prev` to our `prevs`, collecting the readers that may still be reading it, so we
-        // can retire it later.
+        // add `prev` to our `prevs`, collecting the readers that may still be able to reach it,
+        // so we can check on them later.
 
-        let state = self.state_mut();
         let mut remaining_readers = state.pool.pop().unwrap_or_default();
 
-        for (idx, epoch) in epochs.iter() {
-            // This is not where values are freed (see `try_sync()`), so no `Acquire` is needed
-            // here. The SeqCst fence above makes the reader's entry visible to us (see
-            // `Reader::read()`), and mis-tracking a reader is merely conservative.
-            let v = epoch.load(atomic::Ordering::Relaxed);
+        for (idx, slot) in epochs.iter() {
+            // `Acquire` pairs with the `Release` stores in `Reader::read()` (`floor`) and
+            // `Reader::drop` (`DEAD`): a reader skipped here can never reach `prev`, and the
+            // acquire ordering makes all of that reader's accesses to retired values
+            // happen-before any subsequent free of them.
+            let v = slot.epoch.load(atomic::Ordering::Acquire);
             if v == DEAD {
                 state.saw_dead = true;
-            } else if v & READER_FLAG != 0 {
-                remaining_readers.push((idx, v));
+                continue;
+            }
+
+            // Track any reader whose observations have not provably advanced past `prev`: a
+            // reader that has not observed generation `gen` (or newer) may still dereference
+            // `prev` — in a read section started before this publish, or in a future section
+            // (its next load of `active` may legally still return the just-retired pointer;
+            // only read-read coherence bounds it below by its published floor).
+            if slot.floor.load(atomic::Ordering::Acquire) < gen {
+                remaining_readers.push(idx);
             }
         }
 
-        state
-            .prevs
-            .push((unsafe { Box::from_raw(prev) }, remaining_readers));
+        // Note: `prev` stays a raw pointer here (see `PrevVal`): readers may still hold guards
+        // dereferencing it.
+        state.prevs.push((prev, gen, remaining_readers));
     }
 }
 
 /// Something which can read the value, use `[Writer::reader]` to get one, or clone an existing `Reader`
 pub struct Reader<T> {
     shared: Arc<Shared<T>>,
-    epoch: Arc<atomic::AtomicUsize>,
+    slot: Arc<ReaderSlot>,
     // pointer used so we get !Send/!Sync without the `unsafe impl`s below.
     _marker: PhantomData<*const T>,
 }
@@ -395,14 +508,31 @@ impl<T> Clone for Reader<T> {
 
 impl<T> Reader<T> {
     fn new(shared: Arc<Shared<T>>) -> Reader<T> {
-        let epoch = Arc::new(atomic::AtomicUsize::new(0));
-        // note: the slab entry is not tied to this Reader's lifetime; it is removed by the writer
-        // after we mark ourselves DEAD and no prevs entry refers to us.
-        shared.epochs.lock().unwrap().insert(epoch.clone());
+        let slot = Arc::new(ReaderSlot {
+            epoch: atomic::AtomicUsize::new(0),
+            floor: atomic::AtomicUsize::new(0),
+        });
+
+        {
+            let mut epochs = shared.epochs.lock().unwrap();
+            // Initialize the floor while holding the lock: publishes are serialized with this
+            // insertion by the mutex, so this load observes every generation published before
+            // the slot became visible to the writer. The result is a conservative lower bound
+            // (a fresh reader has not observed anything); because this load happens-before any
+            // `read()` of this reader, read-read coherence prevents the reader from ever
+            // loading a value superseded before this generation.
+            slot.floor.store(
+                shared.gen.load(atomic::Ordering::Relaxed),
+                atomic::Ordering::Relaxed,
+            );
+            // note: the slab entry is not tied to this Reader's lifetime; it is removed by the
+            // writer after we mark ourselves DEAD and no prevs entry refers to us.
+            epochs.insert(slot.clone());
+        }
 
         Reader {
             shared,
-            epoch,
+            slot,
             _marker: PhantomData,
         }
     }
@@ -421,12 +551,14 @@ impl<T> Reader<T> {
         //
         // Note: we split this `add` up because we don't need the consistency `add` provides (we're
         // the only writer).
-        let v = self.epoch.load(atomic::Ordering::Relaxed);
+        let v = self.slot.epoch.load(atomic::Ordering::Relaxed);
         assert!(v & READER_FLAG == 0);
 
         // NOTE: we can't call `read()` a second time if we leak the previous
         // `ReadGuard`, so we can assume well behaved values.
-        self.epoch.store(v | READER_FLAG, atomic::Ordering::Relaxed);
+        self.slot
+            .epoch
+            .store(v | READER_FLAG, atomic::Ordering::Relaxed);
 
         // Ensure the `epoch` store is visible in other threads before we read
         // `active` (so we don't free-and-reuse a value we're about to dereference).
@@ -440,6 +572,8 @@ impl<T> Reader<T> {
         //   model: only the fence/fence combination is verified to order this pattern.
         atomic::fence(atomic::Ordering::SeqCst);
 
+        let g = self.shared.gen.load(atomic::Ordering::Acquire);
+
         // Pairs with a `Release` in `Writer::write()`, which ensures that we
         // see all the writes writer makes to things we load via `data`.
         //
@@ -449,13 +583,26 @@ impl<T> Reader<T> {
         // stronger `Acquire`.
         let data = self.shared.active.load(atomic::Ordering::Acquire);
 
+        // Publish our observed generation as the floor. `Release` pairs with the writer's
+        // `Acquire` loads in `publish()`/`collect_prevs()`: once the writer observes this, all
+        // of our accesses sequenced before it (every completed read section, in particular all
+        // dereferences of values superseded before generation `g`) happen-before the writer's
+        // collection of those values. Combined with read-read coherence on `active` (which
+        // bounds every future read section at or after `g`), this is what makes it safe for
+        // the writer to free those values. See `ReaderSlot`.
+        //
+        // Loading the generation before the value (above) is what makes publishing `g` sound:
+        // paired with the writer's `Release` stores in `publish()` (`active`, then `gen`), it
+        // guarantees the `active` load returned a value at least as new as `g`, so the floor
+        // never over-claims.
+        self.slot.floor.store(g, atomic::Ordering::Release);
+
         ReadGuard {
             reader: self,
-            // SAFETY: we've told the writer (via the epoch) that we're reading
-            // a value (by setting the low bit of the epoch), so it won't delete
-            // the value until we update our epoch. We only update our epoch
-            // when this `ReadGuard` is dropped. No `&mut`s are handed out to
-            // the data while it's in the `active` slot.
+            // SAFETY: the value behind `data` can't be freed while we can reach it: the writer
+            // only frees values superseded before some reader's published floor, and our floor
+            // (published above) tells it our observations have not advanced past this value.
+            // No `&mut`s are handed out to the data while it's in the `active` slot.
             data: unsafe { &*data },
         }
     }
@@ -466,13 +613,13 @@ impl<T> Drop for Reader<T> {
         // Mark our epoch as dead. The writer recycles the slab entry later, once no prevs entry
         // refers to it (see `Writer::sweep_dead()`).
         //
-        // `Release` pairs with the writer's `Acquire` load, ensuring our accesses to the epoch
-        // (and any old values we may still be tracked against) happen before the epoch memory is
-        // reclaimed along with the `Arc`.
+        // `Release` pairs with the writer's `Acquire` load: our accesses to the epoch (and any
+        // retired values our floor says we could still reach) happen before the writer treats
+        // us as gone and collects values on our behalf.
         //
         // Note: we don't need the lock for this: a dead-marked epoch is simply never tracked
         // again, and the slab entry keeps the epoch alive until the writer recycles it.
-        self.epoch.store(DEAD, atomic::Ordering::Release);
+        self.slot.epoch.store(DEAD, atomic::Ordering::Release);
     }
 }
 
@@ -511,11 +658,13 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         // NOTE: this split operation is ok because we are the only writer (others read this value).
         // This is split into 2 operations so that better code can be generated (ie: omitting CAS
         // on archs without atomic add opcodes).
-        let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
+        let v = self.reader.slot.epoch.load(atomic::Ordering::Relaxed);
         assert!(v & READER_FLAG != 0);
-        // `Release` pairs with the writer's `Acquire` load in `Writer::try_sync()`: it orders
-        // this read section's loads from the old value before the writer's free.
+        // `Release` pairs with the writer's `Acquire` loads in `Writer::publish()` /
+        // `Writer::try_sync()`: it orders this read section's loads from the value before any
+        // collection decision the writer bases on our epoch.
         self.reader
+            .slot
             .epoch
             .store(v + READER_FLAG, atomic::Ordering::Release);
         // NOTE: adding a fence(SeqCst) here speeds up loom significantly,

@@ -80,10 +80,14 @@ fn guard_map_and_try_map() {
     assert_eq!(*first, 1, "mapped guard still sees the old version");
 
     drop(first);
+    // the old version is handed back once no reader can reach it: after this reader has
+    // observed the new version, read-read coherence guarantees it can never load the old one
+    // again (dropping the guard alone is not enough — a stale `active` load could legally
+    // return the retired pointer until the reader has moved on)
+    assert_eq!(r.read().list, vec![9, 9, 9]);
     collected.extend(w.try_sync());
     assert_eq!(collected.len(), 1);
     assert_eq!(collected[0].list, vec![1, 2, 3]);
-    assert_eq!(r.read().list, vec![9, 9, 9]);
 }
 
 #[test]

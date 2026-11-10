@@ -24,12 +24,12 @@ fn loom_reader_dropped_while_tracked() {
         drop(g);
         drop(rx);
 
-        // writing again must retire the old values (the dropped reader can't be reading them
-        // anymore) and recycle the dead reader's slab slot
+        // writing again retires the old values: value 0 comes back (the dropped reader can't
+        // be reading it anymore), but value 1 stays: rx2 last observed it and is still alive,
+        // so a future (possibly stale) read of `active` could still return it
         let discarded = tx.write(Box::new(2));
-        let mut vals: Vec<usize> = discarded.iter().map(|b| **b).collect();
-        vals.sort_unstable();
-        assert_eq!(vals, vec![0, 1]);
+        let vals: Vec<usize> = discarded.iter().map(|b| **b).collect();
+        assert_eq!(vals, vec![0]);
 
         // a new reader reuses the recycled slot (exercises index reuse/ABA)
         let mut rx3 = tx.reader();
@@ -37,6 +37,13 @@ fn loom_reader_dropped_while_tracked() {
         assert_eq!(*g3, 2);
         drop(g3);
         drop(rx3);
+
+        // rx2 was still pinning value 1 (its last observation); dropping it lets the writer
+        // collect everything
+        drop(rx2);
+        let mut vals: Vec<usize> = tx.sync().iter().map(|b| **b).collect();
+        vals.sort_unstable();
+        assert_eq!(vals, vec![1]);
 
         // and everything has been collected
         let discarded = tx.sync();
