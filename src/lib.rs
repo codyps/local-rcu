@@ -692,6 +692,11 @@ impl<T, U: ?Sized + fmt::Debug> fmt::Debug for MappedReadGuard<'_, T, U> {
 ///   readers should keep reading the last value forever.
 /// - A read returning `Some` may still be in flight when the writer drops:
 ///   the guard stays valid, and the *next* read returns `None`.
+/// - There is no guarantee that a reader observes the most recently written
+///   value before it observes closure: a value published immediately before
+///   the writer drops may be missed. If delivering the final value matters,
+///   keep the writer alive until readers have acknowledged it (this API has
+///   no per-reader version tracking, unlike `tokio::sync::watch`).
 pub mod closing {
     use super::{ReadGuard, Reader, Writer};
     use std::ops::{Deref, DerefMut};

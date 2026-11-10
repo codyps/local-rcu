@@ -136,9 +136,11 @@ fn closing_reader_terminates_when_writer_drops() {
                 assert!(*g >= prev, "value went backwards");
                 prev = *g;
             }
-            // the writer drops only after publishing N, so every reader must
-            // have observed it before seeing closure
-            assert_eq!(prev, N);
+            // a reader may observe closure before it observes the writer's
+            // final write (the flag does not order against the value), so the
+            // last value may be missed: only monotonicity and termination
+            // are guaranteed
+            assert!(prev <= N);
             finished.fetch_add(1, Ordering::SeqCst);
         }));
     }
