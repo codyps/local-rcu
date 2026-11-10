@@ -55,9 +55,8 @@ pub struct Writer<T> {
 unsafe impl<T: Send + Sync> Send for Writer<T> {}
 unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 
-/// A previous active value, along with a snapshot (per still-existing reader) of the epoch at the
-/// time the value was replaced, and the index of that reader's epoch counter (in `Shared::epochs`)
-/// so we can determine what epoch the reader is at now.
+/// Readers (as indices into `Shared::epochs`) that may still be able to reach a particular
+/// retired value, each with a snapshot of its epoch at the time the value was retired.
 ///
 /// We track readers by slab index instead of cloning an `Arc` per tracked reader per write:
 /// - `Arc::clone`/`drop` are atomic RMWs on a cacheline the reader is actively writing (the epoch
@@ -67,7 +66,14 @@ unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 /// - It also avoids a per-write allocation when readers are busy reading.
 type TrackedReaders = Vec<(usize, usize)>;
 
-type PrevVal<T> = (Box<T>, TrackedReaders);
+/// A retired value, kept as a raw pointer until it is collected.
+///
+/// The `Box` is deliberately not re-formed at retire time: creating a `Box` (or any `&mut`) from
+/// the pointer retags the allocation as exclusively owned, which is undefined behavior while
+/// readers may still be dereferencing the value through their `ReadGuard`s (a data race under
+/// Rust's aliasing model, detected by miri). `Writer::collect_prevs()` re-forms the `Box` only
+/// once all tracked readers have been observed to leave the read section they were tracked in.
+type PrevVal<T> = (*mut T, TrackedReaders);
 
 /// State owned by the (single) writer. Kept in `Shared` (behind an `UnsafeCell`) so dropping it
 /// doesn't require the writer to be alive (see `Shared::prevs`).
@@ -80,6 +86,22 @@ struct WriterState<T> {
     /// Set when a `DEAD` epoch has been observed and the epoch slab needs a sweep to recycle
     /// dropped readers.
     saw_dead: bool,
+}
+
+impl<T> Drop for WriterState<T> {
+    fn drop(&mut self) {
+        // Free retired values that were never collected (eg the writer was dropped, or
+        // `write_nosync()` was used without a later `try_sync()`).
+        //
+        // SAFETY: `WriterState` is dropped only when the containing `Shared` is, which requires
+        // the `Arc` refcount held by every `Writer` and `Reader` to reach zero. Every
+        // `ReadGuard` borrows its `Reader`, so no guard (and no `&T` into these values) can
+        // exist by then, and the `Release`/`Acquire` ordering on the final `Arc` decrements
+        // makes the readers' last accesses happen-before this drop.
+        for (val, _) in &mut self.prevs {
+            drop(unsafe { Box::from_raw(*val) });
+        }
+    }
 }
 
 struct Shared<T> {
@@ -251,7 +273,18 @@ impl<T> Writer<T> {
                 // recycle the tracking vec's allocation
                 t.clear();
                 state.pool.push(t);
-                out.push(val);
+                // SAFETY: every reader that could have been dereferencing `val` was tracked
+                // above, and `tracked` being empty means each has been observed to leave the
+                // read section it was tracked in: the `Acquire` load in `retain` pairs with
+                // the `Release` epoch stores in `ReadGuard::drop` and `Reader::read()`, so
+                // their last access to the value happens-before this point. Because every read
+                // section observes the current `active` value (see the `SeqCst` store/load pair
+                // on `active`), a reader that leaves its tracked section can never load this
+                // value again — its next read section observes the value that replaced this
+                // one (or newer). No guard referencing the value can exist or be created.
+                // Re-forming (and later dropping) the `Box` here is therefore race-free; doing
+                // it any earlier (eg at retire time in `publish()`) would be UB (see `PrevVal`).
+                out.push(unsafe { Box::from_raw(val) });
             } else {
                 i += 1;
             }
@@ -332,9 +365,16 @@ impl<T> Writer<T> {
 
         // Half of a Release-Acquire pair, see `Reader::read()` for the `Acquire` half. `Release`
         // ensures that `val` is fully initialized before it is exposed to other threads.
+        //
+        // `SeqCst` (in place of `Release`) is load-bearing: paired with the reader's `SeqCst`
+        // load of `active`, it guarantees a read section always ends up observing the current
+        // value — an SC load cannot be ordered before an SC store to the same location in the
+        // single total order and still read the older value. A reader that re-enters after this
+        // publish therefore loads this value (or newer), never the one being retired, which is
+        // what makes the epoch-snapshot tracking in `collect_prevs()` sound (see the note there).
         self.shared
             .active
-            .store(Box::into_raw(val), atomic::Ordering::Release);
+            .store(Box::into_raw(val), atomic::Ordering::SeqCst);
 
         // This fence (and its counterpart in `Reader::read()`) cannot be relaxed to `Acquire`
         // and/or `Release`: reader and writer form the store-buffering (SB) litmus pattern:
@@ -357,10 +397,13 @@ impl<T> Writer<T> {
         let mut remaining_readers = state.pool.pop().unwrap_or_default();
 
         for (idx, epoch) in epochs.iter() {
-            // This is not where values are freed (see `try_sync()`), so no `Acquire` is needed
-            // here. The SeqCst fence above makes the reader's entry visible to us (see
-            // `Reader::read()`), and mis-tracking a reader is merely conservative.
-            let v = epoch.load(atomic::Ordering::Relaxed);
+            // `Acquire` (in place of `Relaxed`) is load-bearing: a reader we do *not* track here
+            // (idle, or dead) can have this value freed immediately, and the acquire pairs with
+            // the `Release` stores in `Reader::read()` (entry) and `Reader::drop` (`DEAD`) to
+            // order that reader's past accesses of retired values before the free. The SeqCst
+            // fence above ensures a reader that could still load `prev` (its `active` load
+            // precedes our store in the SC total order) is seen as in-section here and tracked.
+            let v = epoch.load(atomic::Ordering::Acquire);
             if v == DEAD {
                 state.saw_dead = true;
             } else if v & READER_FLAG != 0 {
@@ -368,9 +411,9 @@ impl<T> Writer<T> {
             }
         }
 
-        state
-            .prevs
-            .push((unsafe { Box::from_raw(prev) }, remaining_readers));
+        // Note: `prev` stays a raw pointer here (see `PrevVal`): readers may still hold guards
+        // dereferencing it.
+        state.prevs.push((prev, remaining_readers));
     }
 }
 
@@ -426,7 +469,13 @@ impl<T> Reader<T> {
 
         // NOTE: we can't call `read()` a second time if we leak the previous
         // `ReadGuard`, so we can assume well behaved values.
-        self.epoch.store(v | READER_FLAG, atomic::Ordering::Relaxed);
+        //
+        // `Release` (in place of `Relaxed`) is load-bearing: it pairs with the writer's
+        // `Acquire` loads in `publish()`/`collect_prevs()`, so whenever the writer observes our
+        // epoch has moved past a snapshot (triggering collection of the tracked value), all of
+        // our accesses up to this store — in particular every dereference this read section
+        // performs through the guard — happen-before that collection.
+        self.epoch.store(v | READER_FLAG, atomic::Ordering::Release);
 
         // Ensure the `epoch` store is visible in other threads before we read
         // `active` (so we don't free-and-reuse a value we're about to dereference).
@@ -443,11 +492,21 @@ impl<T> Reader<T> {
         // Pairs with a `Release` in `Writer::write()`, which ensures that we
         // see all the writes writer makes to things we load via `data`.
         //
+        // `SeqCst` (in place of `Acquire`) is load-bearing: paired with the writer's `SeqCst`
+        // store, it means a read section always ends up with the value that is current when
+        // this load executes — a load ordered after a store to the same location in the SC
+        // total order cannot return the store's older value. This is what makes the
+        // epoch-snapshot tracking sound: once a read section ends, the reader can never come
+        // back to the value it observed, so the writer may free it after seeing the epoch
+        // change. (`Acquire` alone would allow a later read section to load the already-retired
+        // pointer out of a store buffer — legal store-buffering behavior, and the source of a
+        // data race miri detects.)
+        //
         // Note: `Consume` is good enough for this operation (ie: wrt `active` we only need to
         // ensure that loads via it have a data dependency on other writes).
         // `Consume` isn't supported by current rust/loom though, so we use the
         // stronger `Acquire`.
-        let data = self.shared.active.load(atomic::Ordering::Acquire);
+        let data = self.shared.active.load(atomic::Ordering::SeqCst);
 
         ReadGuard {
             reader: self,
