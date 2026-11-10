@@ -87,6 +87,79 @@ fn guard_map_and_try_map() {
 }
 
 #[test]
+fn closing_slot() {
+    use local_rcu::closing;
+
+    let (mut w, mut r1) = closing::slot(0usize);
+
+    assert!(!r1.is_closed());
+    assert_eq!(*r1.read().unwrap(), 0);
+
+    // Writer methods work through Deref/DerefMut
+    w.write(Box::new(1));
+    assert_eq!(*r1.read().unwrap(), 1);
+
+    // additional readers (via clone and via the writer) observe the same slot
+    // and the same close state
+    let mut r2 = r1.clone();
+    let mut r3 = w.reader();
+    assert_eq!(*r2.read().unwrap(), 1);
+    assert_eq!(*r3.read().unwrap(), 1);
+
+    // an explicit close ends the slot
+    w.close();
+    assert!(r1.is_closed());
+    assert!(r2.read().is_none());
+    assert!(r3.read().is_none());
+}
+
+#[test]
+fn closing_reader_terminates_when_writer_drops() {
+    use local_rcu::closing;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const READERS: usize = 4;
+    const N: usize = 100;
+
+    let (w, r) = closing::slot(0usize);
+    let finished = Arc::new(AtomicUsize::new(0));
+
+    let mut readers = Vec::new();
+    for _ in 0..READERS {
+        let mut r = r.clone();
+        let finished = Arc::clone(&finished);
+        readers.push(thread::spawn(move || {
+            let mut prev = 0;
+            // the classic termination pattern: loop until the writer is gone
+            while let Some(g) = r.read() {
+                assert!(*g >= prev, "value went backwards");
+                prev = *g;
+            }
+            // the writer drops only after publishing N, so every reader must
+            // have observed it before seeing closure
+            assert_eq!(prev, N);
+            finished.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+
+    let writer = thread::spawn(move || {
+        let mut w = w;
+        for i in 1..=N {
+            w.write(Box::new(i));
+            std::thread::yield_now();
+        }
+        drop(w);
+    });
+
+    writer.join().unwrap();
+    for t in readers {
+        t.join().unwrap();
+    }
+    assert_eq!(finished.load(Ordering::SeqCst), READERS);
+}
+
+#[test]
 fn send_100_from_1_to_m() {
     let n = 1000usize;
     let m = 10usize;

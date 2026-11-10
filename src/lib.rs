@@ -658,3 +658,163 @@ impl<T, U: ?Sized + fmt::Debug> fmt::Debug for MappedReadGuard<'_, T, U> {
         fmt::Debug::fmt(&**self, f)
     }
 }
+
+/// An opt-in API where the writer can signal that no further values will be
+/// published, detectable by readers (like `left-right`'s `enter() -> None` or
+/// a channel closing).
+///
+/// This is a thin wrapper around the ordinary [`slot()`] / [`Writer`] /
+/// [`Reader`] API: nothing about the core types changes, and readers that do
+/// not use [`ClosingReader`] pay nothing. The only cost of opting in is one
+/// atomic load of an otherwise uncontended flag per read, and one atomic
+/// store when the writer is dropped.
+///
+/// ```
+/// let (mut w, mut r) = local_rcu::closing::slot(0usize);
+///
+/// assert_eq!(*r.read().unwrap(), 0);
+/// w.write(Box::new(1));
+/// assert_eq!(*r.read().unwrap(), 1);
+///
+/// drop(w);
+/// // no more values will ever be published:
+/// assert!(r.read().is_none());
+/// assert!(r.is_closed());
+/// ```
+///
+/// # Semantics
+///
+/// - [`ClosingWriter::close()`] (or dropping the writer) sets the flag;
+///   afterwards every [`ClosingReader::read()`] returns `None`.
+/// - The flag is only a signal: the last published value remains valid
+///   (and owned) until readers drop it, but [`ClosingReader`] does not give
+///   access to it after closure. Use the plain [`Reader`] API instead if
+///   readers should keep reading the last value forever.
+/// - A read returning `Some` may still be in flight when the writer drops:
+///   the guard stays valid, and the *next* read returns `None`.
+pub mod closing {
+    use super::{ReadGuard, Reader, Writer};
+    use std::ops::{Deref, DerefMut};
+    use std::sync::{atomic, Arc};
+
+    /// The "no more values will be published" flag shared between a
+    /// [`ClosingWriter`] and all its [`ClosingReader`]s.
+    struct CloseState(atomic::AtomicBool);
+
+    impl CloseState {
+        fn close(&self) {
+            // `Release` so that everything the writer did (including its
+            // final writes) is visible to a reader that observes the close.
+            self.0.store(true, atomic::Ordering::Release);
+        }
+
+        fn is_closed(&self) -> bool {
+            self.0.load(atomic::Ordering::Acquire)
+        }
+    }
+
+    /// Like [`slot()`](crate::slot), but the writer's drop is observable by
+    /// its readers.
+    pub fn slot<T>(init_val: T) -> (ClosingWriter<T>, ClosingReader<T>) {
+        let (w, r) = super::slot(init_val);
+        let state = Arc::new(CloseState(atomic::AtomicBool::new(false)));
+
+        (
+            ClosingWriter {
+                inner: w,
+                state: state.clone(),
+            },
+            ClosingReader { inner: r, state },
+        )
+    }
+
+    /// A [`Writer`] whose drop (or an explicit
+    /// [`close()`](ClosingWriter::close)) signals readers that no further
+    /// values will be published.
+    ///
+    /// All [`Writer`] methods are available through `Deref`/`DerefMut`.
+    pub struct ClosingWriter<T> {
+        inner: Writer<T>,
+        state: Arc<CloseState>,
+    }
+
+    impl<T> ClosingWriter<T> {
+        /// Create another reader that observes closure.
+        ///
+        /// (Shadows [`Writer::reader()`], which would produce a plain
+        /// [`Reader`] without closure detection.)
+        pub fn reader(&self) -> ClosingReader<T> {
+            ClosingReader {
+                inner: self.inner.reader(),
+                state: self.state.clone(),
+            }
+        }
+
+        /// Consume the writer, signaling readers that no further values
+        /// will be published.
+        ///
+        /// Equivalent to dropping the writer; provided for explicitly
+        /// ending a slot at a chosen point.
+        pub fn close(self) {
+            // `Drop` sets the flag.
+        }
+    }
+
+    impl<T> Drop for ClosingWriter<T> {
+        fn drop(&mut self) {
+            self.state.close();
+        }
+    }
+
+    impl<T> Deref for ClosingWriter<T> {
+        type Target = Writer<T>;
+        fn deref(&self) -> &Self::Target {
+            &self.inner
+        }
+    }
+
+    impl<T> DerefMut for ClosingWriter<T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.inner
+        }
+    }
+
+    /// A [`Reader`] that can tell when its [`ClosingWriter`] has been
+    /// dropped or closed.
+    ///
+    /// Cloning produces another reader observing the same slot and the same
+    /// close state.
+    pub struct ClosingReader<T> {
+        inner: Reader<T>,
+        state: Arc<CloseState>,
+    }
+
+    impl<T> Clone for ClosingReader<T> {
+        fn clone(&self) -> Self {
+            ClosingReader {
+                inner: self.inner.clone(),
+                state: self.state.clone(),
+            }
+        }
+    }
+
+    impl<T> ClosingReader<T> {
+        /// Like [`Reader::read()`], but returns `None` once the writer has
+        /// been dropped or closed.
+        ///
+        /// The returned guard is the ordinary [`ReadGuard`] (and supports
+        /// [`ReadGuard::map`](crate::ReadGuard::map) etc).
+        pub fn read(&mut self) -> Option<ReadGuard<'_, T>> {
+            if self.state.is_closed() {
+                None
+            } else {
+                Some(self.inner.read())
+            }
+        }
+
+        /// Has the writer been dropped or closed?
+        pub fn is_closed(&self) -> bool {
+            self.state.is_closed()
+        }
+    }
+}

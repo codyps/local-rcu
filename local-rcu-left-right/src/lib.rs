@@ -24,8 +24,9 @@
 //! * As in `left-right`, every operation is applied twice — once when
 //!   appended, and again when the stale copy is taken back and "rebased" —
 //!   so operations must be deterministic.
-//! * `left-right` signals writer drop (`enter()` returning `None`); readers
-//!   here keep observing the last published value indefinitely.
+//! * `left-right` signals writer drop (`enter()` returning `None`). Readers
+//!   here keep observing the last published value indefinitely; pair the
+//!   reader with `local_rcu::closing` if closure detection is needed.
 //! * `left-right` hides the operation log and copy management entirely; this
 //!   crate is a thin layer so the moving parts stay visible.
 //! * This crate is **not published**; it mainly exists to benchmark the
