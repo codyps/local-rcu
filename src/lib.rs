@@ -22,7 +22,7 @@ use loom::{
     sync::{atomic, Arc, Mutex},
     thread,
 };
-use std::{cell::UnsafeCell, marker::PhantomData, ops::Deref};
+use std::{cell::UnsafeCell, fmt, marker::PhantomData, ops::Deref};
 #[cfg(not(loom))]
 use std::{
     sync::{atomic, Arc, Mutex},
@@ -493,6 +493,12 @@ impl<'a, T> Deref for ReadGuard<'a, T> {
     }
 }
 
+impl<T: fmt::Debug> fmt::Debug for ReadGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
 /// Bit in a reader's epoch indicating it is currently in a read section.
 ///
 /// We use bit 1 (value `2`) rather than bit 0 so that all naturally produced epochs are even,
@@ -517,5 +523,138 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         // implies:
         // - omitting the fence may be useful for perf
         // - omitting the fence opens up lots of ways for our code to be wrong.
+    }
+}
+
+impl<'a, T> ReadGuard<'a, T> {
+    /// Project the guard onto a part of the guarded value, keeping the read
+    /// section (and thus the observed version of the value) alive.
+    ///
+    /// This is an associated function (like `RefCell`'s `Ref::map`) so that
+    /// it is not shadowed by methods of the guarded type reachable through
+    /// `Deref`.
+    ///
+    /// Useful to return a reference to a part of the value from a function,
+    /// which is not possible with the plain guard (the guard would be
+    /// dropped at the end of the function):
+    ///
+    /// ```
+    /// use local_rcu::{MappedReadGuard, ReadGuard};
+    ///
+    /// struct Config {
+    ///     name: String,
+    /// }
+    ///
+    /// fn name<'a>(r: &'a mut local_rcu::Reader<Config>) -> MappedReadGuard<'a, Config, str> {
+    ///     let g = r.read();
+    ///     ReadGuard::map(g, |c| &c.name[..])
+    /// }
+    ///
+    /// let (_w, mut r) = local_rcu::slot(Config { name: "local-rcu".to_owned() });
+    /// assert_eq!(&*name(&mut r), "local-rcu");
+    /// ```
+    pub fn map<U: ?Sized, F>(orig: ReadGuard<'a, T>, f: F) -> MappedReadGuard<'a, T, U>
+    where
+        F: FnOnce(&T) -> &U,
+    {
+        MappedReadGuard {
+            data: f(orig.data),
+            _guard: orig,
+        }
+    }
+
+    /// Like [`ReadGuard::map`], but with a fallible projection: returns the
+    /// original guard unchanged when the closure returns `None` (so a miss
+    /// does not end the read section).
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    ///
+    /// let (_w, mut r) = local_rcu::slot(HashMap::from([("risk", 7u32)]));
+    ///
+    /// let g = r.read();
+    /// let v = local_rcu::ReadGuard::try_map(g, |m| m.get("risk")).unwrap();
+    /// assert_eq!(*v, 7);
+    /// drop(v);
+    ///
+    /// let g = r.read();
+    /// // a miss hands the un-projected guard back:
+    /// let g = local_rcu::ReadGuard::try_map(g, |m| m.get("missing")).unwrap_err();
+    /// assert_eq!(g.len(), 1);
+    /// ```
+    pub fn try_map<U: ?Sized, F>(
+        orig: ReadGuard<'a, T>,
+        f: F,
+    ) -> Result<MappedReadGuard<'a, T, U>, ReadGuard<'a, T>>
+    where
+        F: FnOnce(&T) -> Option<&U>,
+    {
+        match f(orig.data) {
+            Some(data) => Ok(MappedReadGuard { data, _guard: orig }),
+            None => Err(orig),
+        }
+    }
+}
+
+/// A [`ReadGuard`] projected onto a part of the guarded value.
+///
+/// Created by [`ReadGuard::map`], [`ReadGuard::try_map`],
+/// [`MappedReadGuard::map`], or [`MappedReadGuard::try_map`]. Dropping it
+/// ends the read section, exactly like dropping the guard it was created
+/// from: the projection borrows from the guarded value, so it cannot outlive
+/// the guard keeping the read section open (which this type owns).
+///
+/// If this is leaked, the value it points to will also leak (as with
+/// [`ReadGuard`]).
+pub struct MappedReadGuard<'a, T, U: ?Sized> {
+    /// Keeps the read section open (and with it, the observed version).
+    _guard: ReadGuard<'a, T>,
+    data: &'a U,
+}
+
+impl<'a, T, U: ?Sized> MappedReadGuard<'a, T, U> {
+    /// Project the guard onto a further part of the referenced data.
+    ///
+    /// Like [`ReadGuard::map`], this is an associated function so it is not
+    /// shadowed by methods of the referenced type reachable through `Deref`.
+    pub fn map<U2: ?Sized, F>(orig: MappedReadGuard<'a, T, U>, f: F) -> MappedReadGuard<'a, T, U2>
+    where
+        F: FnOnce(&U) -> &U2,
+    {
+        MappedReadGuard {
+            data: f(orig.data),
+            _guard: orig._guard,
+        }
+    }
+
+    /// Like [`MappedReadGuard::map`], but with a fallible projection:
+    /// returns the original guard unchanged when the closure returns `None`.
+    pub fn try_map<U2: ?Sized, F>(
+        orig: MappedReadGuard<'a, T, U>,
+        f: F,
+    ) -> Result<MappedReadGuard<'a, T, U2>, MappedReadGuard<'a, T, U>>
+    where
+        F: FnOnce(&U) -> Option<&U2>,
+    {
+        match f(orig.data) {
+            Some(data) => Ok(MappedReadGuard {
+                data,
+                _guard: orig._guard,
+            }),
+            None => Err(orig),
+        }
+    }
+}
+
+impl<'a, T, U: ?Sized> Deref for MappedReadGuard<'a, T, U> {
+    type Target = U;
+    fn deref(&self) -> &Self::Target {
+        self.data
+    }
+}
+
+impl<T, U: ?Sized + fmt::Debug> fmt::Debug for MappedReadGuard<'_, T, U> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
     }
 }
