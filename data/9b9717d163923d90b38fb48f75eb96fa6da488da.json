@@ -1,0 +1,72 @@
+{
+ "arch": "aarch64",
+ "commit": "9b9717d163923d90b38fb48f75eb96fa6da488da",
+ "date": "2026-11-10T19:03:02-05:00",
+ "results": [
+  {
+   "name": "b/n100_m10",
+   "unit": "ms",
+   "value": 13.385
+  },
+  {
+   "name": "b/n1000_m10",
+   "unit": "ms",
+   "value": 46.9
+  },
+  {
+   "name": "isolated/reader m=1 writer_active=false",
+   "unit": "reads/s/reader",
+   "value": 254783780
+  },
+  {
+   "name": "isolated/reader m=4 writer_active=false",
+   "unit": "reads/s/reader",
+   "value": 247300265
+  },
+  {
+   "name": "isolated/reader m=1 writer_active=true",
+   "unit": "reads/s/reader",
+   "value": 45713663
+  },
+  {
+   "name": "isolated/reader m=4 writer_active=true",
+   "unit": "reads/s/reader",
+   "value": 132901722
+  },
+  {
+   "name": "isolated/writer m=0 readers_idle",
+   "unit": "writes/s",
+   "value": 17636229
+  },
+  {
+   "name": "isolated/writer m=1 readers_idle",
+   "unit": "writes/s",
+   "value": 16420538
+  },
+  {
+   "name": "isolated/writer m=4 readers_idle",
+   "unit": "writes/s",
+   "value": 17257068
+  },
+  {
+   "name": "isolated/writer m=8 readers_idle",
+   "unit": "writes/s",
+   "value": 16193709
+  },
+  {
+   "name": "isolated/writer m=1 readers_busy",
+   "unit": "writes/s",
+   "value": 4978012
+  },
+  {
+   "name": "isolated/writer m=4 readers_busy",
+   "unit": "writes/s",
+   "value": 269558
+  },
+  {
+   "name": "isolated/writer m=8 readers_busy",
+   "unit": "writes/s",
+   "value": 95153
+  }
+ ]
+}
