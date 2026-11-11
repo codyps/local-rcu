@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 """Parse benchmark output from both bench targets into a single JSON record.
 
-Usage: bench_parse.py CRITERION_TXT ISOLATED_TXT OUT_JSON ARCH
+Usage: bench_parse.py CRITERION_TXT ISOLATED_TXT OUT_JSON ARCH [LSCPU_TXT UNAME_LINE]
 
 Environment: COMMIT_SHA, COMMIT_DATE (ISO 8601).
 
 Emits one record:
-  { "arch", "commit", "date", "results": [ {"name", "unit", "value"} ] }
+  { "arch", "commit", "date", "hardware"?, "results": [ {"name","unit","value"} ] }
+
+`hardware` (when LSCPU_TXT/UNAME_LINE are given) carries the runner's CPU
+model, vCPU count and uname line, so the site/notes can attribute numbers to
+specific runner hardware.
 """
 
 import json
 import os
 import re
 import sys
+
+
+def parse_hardware(lscpu_path, uname_line):
+    fields = {}
+    for line in open(lscpu_path):
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip()
+    model = fields.get("Model name") or fields.get("Model") or "unknown cpu"
+    cores = fields.get("CPU(s)") or "?"
+    return {"cpu_model": model, "cores": cores, "uname": uname_line}
 
 
 def parse_criterion(path, results):
@@ -67,6 +82,8 @@ def main():
         "date": os.environ["COMMIT_DATE"],
         "results": results,
     }
+    if len(sys.argv) >= 7:
+        record["hardware"] = parse_hardware(sys.argv[5], sys.argv[6])
     with open(out_json, "w") as f:
         json.dump(record, f, indent=1, sort_keys=True)
         f.write("\n")

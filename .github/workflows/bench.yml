@@ -79,6 +79,8 @@ jobs:
             echo
             echo '```'
             rustc -vV | grep -E '^(host|release)'
+            uname -a
+            lscpu
             echo
             echo "## criterion — candidate vs baseline (change %)"
             cat candidate-criterion.txt

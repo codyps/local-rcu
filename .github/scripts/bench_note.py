@@ -25,7 +25,11 @@ def main():
         except FileNotFoundError:
             continue
         found = True
-        lines.append(f"{rec['arch']}:")
+        hw = rec.get("hardware") or {}
+        title = rec["arch"]
+        if hw.get("cpu_model"):
+            title += f" ({hw['cpu_model']}, {hw.get('cores', '?')} vCPU)"
+        lines.append(f"{title}:")
         width = max(len(r["name"]) for r in rec["results"])
         for r in rec["results"]:
             value = f"{r['value']:,}" if isinstance(r["value"], int) else f"{r['value']:g}"

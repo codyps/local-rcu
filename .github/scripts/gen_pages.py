@@ -38,11 +38,42 @@ PAGE = """<!DOCTYPE html>
 <h1>local-rcu benchmark history</h1>
 <p>One point per commit of <code>main</code> (plus a weekly drift sample).
 Shared-runner noise applies; look at trends, not points.</p>
+<h2>Runners</h2>
+<p id="runners"></p>
+<div id="hwblocks"></div>
 <div id="charts"></div>
 <footer>generated __GENERATED__ from __NCOMMITS__ recorded runs</footer>
 <script>
 const DATA = __DATA__;
 const COLORS = { x86_64: "#2563eb", aarch64: "#dc2626" };
+
+// runners summary + full lscpu dumps
+{
+  const rp = document.getElementById("runners");
+  for (const [arch, models] of Object.entries(DATA.runner_counts)) {
+    const line = document.createElement("p");
+    const dot = document.createElement("span");
+    dot.textContent = "\u25cf ";
+    dot.style.color = COLORS[arch] || "#16a34a";
+    line.appendChild(dot);
+    line.appendChild(document.createTextNode(arch + ": "));
+    line.appendChild(document.createTextNode(
+      Object.entries(models).map(([m, n]) => `${m} (${n} runs)`).join(", ")));
+    rp.appendChild(line);
+  }
+  const hwb = document.getElementById("hwblocks");
+  for (const [name, text] of Object.entries(DATA.hardware_files)) {
+    const d = document.createElement("details");
+    const s = document.createElement("summary");
+    s.textContent = name;
+    d.appendChild(s);
+    const pre = document.createElement("pre");
+    pre.textContent = text;
+    d.appendChild(pre);
+    hwb.appendChild(d);
+  }
+}
+
 const container = document.getElementById("charts");
 for (const name of Object.keys(DATA.charts).sort()) {
   const meta = DATA.charts[name];
@@ -96,21 +127,35 @@ def main():
     points = {}
     dates = {}
     units = {}
+    models = {}  # (arch, commit) -> cpu model (records may predate hardware capture)
+    hardware_files = {}  # filename -> full lscpu text
     nruns = 0
     for path in sorted(p for d in data_dirs for p in glob.glob(d + "/*.json")):
         nruns += 1
         rec = json.load(open(path))
+        hw = rec.get("hardware") or {}
+        if hw.get("cpu_model"):
+            models[(rec["arch"], rec["commit"])] = hw["cpu_model"]
         for r in rec["results"]:
             key = (rec["commit"], rec["arch"], r["name"])
             points[key] = r["value"]
             dates[key] = rec["date"]
             units[r["name"]] = r["unit"]
+        # sibling runner dumps (collected next to the records)
+        for hwpath in glob.glob(path.rsplit("/", 1)[0] + "/hardware-*.txt"):
+            hardware_files[hwpath.rsplit("/", 1)[1]] = open(hwpath).read()
+
+    # runners summary: per arch, which cpu models produced how many runs
+    runner_counts = {}
+    for (arch, _commit), model in models.items():
+        runner_counts.setdefault(arch, {})
+        runner_counts[arch][model] = runner_counts[arch].get(model, 0) + 1
 
     # group per bench name -> arch -> sorted series
     charts = {}
     for (commit, arch, name), value in points.items():
         charts.setdefault(name, {}).setdefault(arch, []).append(
-            {"commit": commit[:8], "date": dates[(commit, arch, name)], "value": value}
+            {"commit": commit, "date": dates[(commit, arch, name)], "value": value}
         )
 
     labels = {}
@@ -122,7 +167,22 @@ def main():
             for p in pts:
                 ticks[(p["date"], p["commit"])] = None
         ordered = sorted(ticks.keys())
-        labels[name] = [f"{d[5:16].replace('T', ' ')} {c[:8]}" for d, c in ordered]
+        # annotate a tick's label with the cpu model when it changed for an
+        # arch (hardware transitions are the first suspect when trends break)
+        last_model = {}
+        built = []
+        for d, c in ordered:
+            label = f"{d[5:16].replace('T', ' ')} {c[:8]}"
+            changed = []
+            for arch in per_arch:
+                m = models.get((arch, c))
+                if m and m != last_model.get(arch):
+                    changed.append(m)
+                    last_model[arch] = m
+            if changed:
+                label += " [" + " / ".join(dict.fromkeys(changed)) + "]"
+            built.append(label)
+        labels[name] = built
         for arch, pts in per_arch.items():
             pts.sort(key=lambda p: (p["date"], p["commit"]))
             # map onto the shared tick list (NaN where this arch has no point)
@@ -131,7 +191,15 @@ def main():
                 by_tick.get(tick, float("nan")) for tick in ordered
             ]
 
-    payload = json.dumps({"charts": charts, "labels": labels, "units": units})
+    payload = json.dumps(
+        {
+            "charts": charts,
+            "labels": labels,
+            "units": units,
+            "runner_counts": runner_counts,
+            "hardware_files": hardware_files,
+        }
+    )
 
     import datetime
 

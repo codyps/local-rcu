@@ -70,13 +70,18 @@ jobs:
         run: |
           cargo bench --bench b | tee criterion.txt
           cargo bench --bench isolated | tee isolated.txt
+          # hardware context for the record (shared-runner pools are
+          # heterogeneous; trends must be attributable to a cpu model)
+          lscpu | tee lscpu.txt
+          uname -a | tee uname.txt
 
       - name: Parse results
         run: |
           COMMIT_SHA="$SHA" \
           COMMIT_DATE="$(git show -s --format=%cI HEAD)" \
             python3 .github/scripts/bench_parse.py \
-              criterion.txt isolated.txt "record-$ARCH.json" "$ARCH"
+              criterion.txt isolated.txt "record-$ARCH.json" "$ARCH" \
+              lscpu.txt "$(cat uname.txt)"
 
       - name: Append record to the orphan data branch
         run: |
@@ -88,9 +93,14 @@ jobs:
             git checkout --orphan "$BRANCH"
             git rm -rf .
           fi
-          mkdir -p data
+          mkdir -p data hardware
           cp "record-$ARCH.json" "data/$SHA.json"
-          git add data
+          # full lscpu dump, deduplicated: one file per distinct runner config
+          HW_SHA=$(sha256sum lscpu.txt | cut -d' ' -f1)
+          if [ ! -f "hardware/$HW_SHA.txt" ]; then
+            cp lscpu.txt "hardware/$HW_SHA.txt"
+          fi
+          git add data hardware
           git commit -m "bench: $ARCH $SHA"
           git push origin "$BRANCH"
 
@@ -115,12 +125,17 @@ jobs:
         run: |
           git fetch --depth=1 origin bench-data-x86_64 bench-data-aarch64
           mkdir -p data-x86_64 data-aarch64
-          for f in $(git ls-tree -r --name-only origin/bench-data-x86_64 -- data); do
-            git show "origin/bench-data-x86_64:$f" > "data-x86_64/$(basename "$f")"
-          done
-          for f in $(git ls-tree -r --name-only origin/bench-data-aarch64 -- data); do
-            git show "origin/bench-data-aarch64:$f" > "data-aarch64/$(basename "$f")"
-          done
+          collect() {
+            for f in $(git ls-tree -r --name-only "origin/$1" -- data); do
+              git show "origin/$1:$f" > "$2/$(basename "$f")"
+            done
+            # full runner dumps, saved next to the records they belong to
+            for f in $(git ls-tree -r --name-only "origin/$1" -- hardware || true); do
+              git show "origin/$1:$f" > "$2/$(basename "$f")"
+            done
+          }
+          collect bench-data-x86_64 data-x86_64
+          collect bench-data-aarch64 data-aarch64
       - name: Generate site
         run: |
           # generate outside the worktree: the deploy uploads from there
