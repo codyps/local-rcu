@@ -8,8 +8,8 @@ Readers don't block writers, slow readers just cause more memory usage (assuming
 a continuously updating writer, old values are preserved until there are no
 readers examining them).
 
-Readers outside a read section don't block destruction of old values. Readers inside
-a read section may block destruction of old values other than the one they are reading
+Readers outside a read section don't block collection of old values. Readers inside
+a read section may block collection of old values other than the one they are reading
 with low probability.
 
 ## If I want behavior like X, what should I do?
