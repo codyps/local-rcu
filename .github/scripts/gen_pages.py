@@ -15,6 +15,8 @@ import sys
 
 CHARTJS = "https://cdn.jsdelivr.net/npm/chart.js@4"
 
+REPO = "https://github.com/codyps/local-rcu"
+
 PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -37,6 +39,7 @@ PAGE = """<!DOCTYPE html>
 <body>
 <h1>local-rcu benchmark history</h1>
 <p>One point per commit of <code>main</code> (plus a weekly drift sample).
+Click a commit label below a chart to open that commit.
 Shared-runner noise applies; look at trends, not points.</p>
 <h2>Runners</h2>
 <p id="runners"></p>
@@ -75,6 +78,31 @@ const COLORS = { x86_64: "#2563eb", aarch64: "#dc2626" };
 }
 
 const container = document.getElementById("charts");
+// tick labels are canvas-drawn, so emulate links with native listeners:
+// clicks in the axis-label band below the plot open that tick's commit
+function attachCommitLinks(chart, cvs, commits) {
+  const hit = (e) => {
+    // fresh geometry: the chart may have been resized since the last event
+    const area = chart.chartArea, xs = chart.scales.x;
+    if (!xs || !xs.ticks || !xs.ticks.length) return null;
+    const x = e.offsetX, y = e.offsetY;
+    if (y < area.bottom + 2 || y > chart.height) return null;
+    let best = null, bestDx = Infinity;
+    for (const t of xs.ticks) {
+      const dx = Math.abs(xs.getPixelForValue(t.value) - x);
+      if (dx < bestDx) { bestDx = dx; best = t.value; }
+    }
+    if (best == null || bestDx > 50 || !commits[best]) return null;
+    return commits[best];
+  };
+  cvs.addEventListener("mousemove", (e) => {
+    cvs.style.cursor = hit(e) ? "pointer" : "";
+  });
+  cvs.addEventListener("click", (e) => {
+    const sha = hit(e);
+    if (sha) window.open(DATA.repo + "/commit/" + sha, "_self");
+  });
+}
 for (const name of Object.keys(DATA.charts).sort()) {
   const meta = DATA.charts[name];
   const sec = document.createElement("section");
@@ -90,7 +118,7 @@ for (const name of Object.keys(DATA.charts).sort()) {
   box.appendChild(cvs);
   sec.appendChild(h); sec.appendChild(box); container.appendChild(sec);
   const labels = DATA.labels[name];
-  new Chart(cvs, {
+  const chart = new Chart(cvs, {
     type: "line",
     data: {
       labels: labels,
@@ -112,6 +140,7 @@ for (const name of Object.keys(DATA.charts).sort()) {
       plugins: { legend: { display: true } },
     },
   });
+  attachCommitLinks(chart, cvs, DATA.commits[name]);
 }
 </script>
 </body>
@@ -159,6 +188,7 @@ def main():
         )
 
     labels = {}
+    commits = {}
     for name, per_arch in charts.items():
         # one tick per unique (date, commit): arches record the same commits,
         # and re-runs of a commit collapse to a single point
@@ -167,6 +197,8 @@ def main():
             for p in pts:
                 ticks[(p["date"], p["commit"])] = None
         ordered = sorted(ticks.keys())
+        # full commit shas per tick (labels truncate; clicks need the sha)
+        commits[name] = [c for _d, c in ordered]
         # annotate a tick's label with the cpu model when it changed for an
         # arch (hardware transitions are the first suspect when trends break)
         last_model = {}
@@ -193,8 +225,10 @@ def main():
 
     payload = json.dumps(
         {
+            "repo": REPO,
             "charts": charts,
             "labels": labels,
+            "commits": commits,
             "units": units,
             "runner_counts": runner_counts,
             "hardware_files": hardware_files,
