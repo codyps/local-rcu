@@ -138,7 +138,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@0252fc4ba7626f0298f0cf00902a25c6afc77fa8 # v3.0.0
         with:
-          path: "$RUNNER_TEMP/site"
+          # `with:` inputs are literal: use the expression form, not $RUNNER_TEMP
+          path: ${{ runner.temp }}/site
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
