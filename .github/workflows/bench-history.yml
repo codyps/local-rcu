@@ -9,8 +9,9 @@ name: bench-history
 #   (`bench-data-x86_64` / `bench-data-aarch64`: no shared history with
 #   main, one small file per recorded run).
 # - the pages job regenerates a static Chart.js site from all recorded
-#   data and publishes it to the orphan `gh-pages` branch (GitHub Pages
-#   serves from there).
+#   data and deploys it to GitHub Pages via actions (no site branch), and
+#   attaches a human-readable benchmark summary as a git note to the
+#   commit (visible in `git show` and on the GitHub commit page).
 
 on:
   push:
@@ -21,9 +22,11 @@ on:
     # weekly drift sample of the current head of main
     - cron: "23 5 * * 0"
 
-# data + site branches are pushed with the workflow token
+# data + notes branches are pushed and Pages deployed with the workflow token
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 # avoid overlapping runs racing on the gh-pages push; superseded runs are
 # cancelled (their commit is superseded anyway)
@@ -95,10 +98,19 @@ jobs:
     needs: bench
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     env:
       SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+        with:
+          # one-time: switch Pages to deployment-by-workflow
+          enablement: true
       - name: Collect recorded data
         run: |
           git fetch --depth=1 origin bench-data-x86_64 bench-data-aarch64
@@ -111,22 +123,22 @@ jobs:
           done
       - name: Generate site
         run: |
-          # generate outside the worktree: the publish step wipes it
+          # generate outside the worktree: the deploy uploads from there
           python3 .github/scripts/gen_pages.py \
             "$RUNNER_TEMP/site/index.html" data-x86_64 data-aarch64
-      - name: Publish to the orphan gh-pages branch
+      - name: Attach benchmark summary note to the commit
         run: |
+          git fetch origin refs/notes/commits:refs/notes/commits || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git fetch --depth=1 origin gh-pages; then
-            git checkout -B gh-pages origin/gh-pages
-          else
-            git checkout --orphan gh-pages
-            git rm -rf .
-          fi
-          # .git survives `rm -rf ./*` (dot entries are not globbed)
-          rm -rf ./*
-          cp -r "$RUNNER_TEMP/site/"* ./
-          git add -A
-          git commit -m "pages: update for $SHA"
-          git push origin gh-pages
+          python3 .github/scripts/bench_note.py "$SHA" \
+            data-x86_64 data-aarch64 > "$RUNNER_TEMP/note.txt"
+          git notes add -f -F "$RUNNER_TEMP/note.txt" "$SHA"
+          git push origin refs/notes/commits
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@0252fc4ba7626f0298f0cf00902a25c6afc77fa8 # v3.0.0
+        with:
+          path: "$RUNNER_TEMP/site"
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
