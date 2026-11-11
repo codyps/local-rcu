@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7](https://github.com/codyps/local-rcu/compare/v1.0.6...v1.0.7) - 2026-11-11
+
+### Fixed
+
+- fix UB: make read sections always observe the current value (SeqCst active)
+
+### Other
+
+- record the runner hardware with each result
+- stop charts growing without bound
+- *(bench-history)* expand runner.temp via expression in upload path
+- *(bench-history)* deploy Pages via actions, attach bench summary as git notes
+- *(bench-history)* generate the site outside the worktree before wiping it
+- record benchmarks per commit, publish history site on Pages
+- run the test suite under miri on nightly
+- add benchmark-comparison workflow (x86_64 + aarch64)
+- Enhance README with epoch management details
+- Update README with Writer epoch handling details
+- Expand README with internal flow explanation
+
 ## [1.0.6](https://github.com/codyps/local-rcu/compare/v1.0.5...v1.0.6) - 2026-11-10
 
 ### Other
