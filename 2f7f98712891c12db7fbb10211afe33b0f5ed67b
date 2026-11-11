@@ -1,0 +1,31 @@
+Benchmarks recorded by CI (shared runners; indicative only).
+
+x86_64 (AMD EPYC 9V74 80-Core Processor, 4 vCPU):
+  b/n100_m10                               13.83 ms
+  b/n1000_m10                              51.577 ms
+  isolated/reader m=1 writer_active=false  785,843,492 reads/s/reader
+  isolated/reader m=4 writer_active=false  465,477,638 reads/s/reader
+  isolated/reader m=1 writer_active=true   292,073,060 reads/s/reader
+  isolated/reader m=4 writer_active=true   277,438,318 reads/s/reader
+  isolated/writer m=0 readers_idle         24,209,520 writes/s
+  isolated/writer m=1 readers_idle         17,475,602 writes/s
+  isolated/writer m=4 readers_idle         16,721,935 writes/s
+  isolated/writer m=8 readers_idle         15,773,556 writes/s
+  isolated/writer m=1 readers_busy         3,389,765 writes/s
+  isolated/writer m=4 readers_busy         583,678 writes/s
+  isolated/writer m=8 readers_busy         100,268 writes/s
+
+aarch64 (Neoverse-N2, 4 vCPU):
+  b/n100_m10                               13.127 ms
+  b/n1000_m10                              43.194 ms
+  isolated/reader m=1 writer_active=false  255,000,527 reads/s/reader
+  isolated/reader m=4 writer_active=false  253,856,633 reads/s/reader
+  isolated/reader m=1 writer_active=true   60,978,239 reads/s/reader
+  isolated/reader m=4 writer_active=true   96,573,818 reads/s/reader
+  isolated/writer m=0 readers_idle         17,856,596 writes/s
+  isolated/writer m=1 readers_idle         16,530,803 writes/s
+  isolated/writer m=4 readers_idle         17,392,989 writes/s
+  isolated/writer m=8 readers_idle         16,310,372 writes/s
+  isolated/writer m=1 readers_busy         6,102,407 writes/s
+  isolated/writer m=4 readers_busy         281,076 writes/s
+  isolated/writer m=8 readers_busy         71,881 writes/s
