@@ -12,6 +12,9 @@ Readers outside a read section don't block collection of old values. Readers ins
 a read section may block collection of old values other than the one they are reading
 with low probability.
 
+Readers read a borrowed value (the Reader itself is refcounted, not the value being read). 
+riters provide an entire replacement value (as this is RCU-like).
+
 ## If I want behavior like X, what should I do?
 
 ### `left-right`
