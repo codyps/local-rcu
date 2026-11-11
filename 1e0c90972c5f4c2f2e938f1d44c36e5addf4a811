@@ -1,0 +1,31 @@
+Benchmarks recorded by CI (shared runners; indicative only).
+
+x86_64:
+  b/n100_m10                               13.557 ms
+  b/n1000_m10                              51.141 ms
+  isolated/reader m=1 writer_active=false  727,665,726 reads/s/reader
+  isolated/reader m=4 writer_active=false  412,778,875 reads/s/reader
+  isolated/reader m=1 writer_active=true   246,906,028 reads/s/reader
+  isolated/reader m=4 writer_active=true   231,571,421 reads/s/reader
+  isolated/writer m=0 readers_idle         22,113,617 writes/s
+  isolated/writer m=1 readers_idle         21,645,382 writes/s
+  isolated/writer m=4 readers_idle         12,329,244 writes/s
+  isolated/writer m=8 readers_idle         11,317,790 writes/s
+  isolated/writer m=1 readers_busy         3,023,296 writes/s
+  isolated/writer m=4 readers_busy         433,264 writes/s
+  isolated/writer m=8 readers_busy         64,506 writes/s
+
+aarch64:
+  b/n100_m10                               13.145 ms
+  b/n1000_m10                              43.114 ms
+  isolated/reader m=1 writer_active=false  254,159,743 reads/s/reader
+  isolated/reader m=4 writer_active=false  253,461,447 reads/s/reader
+  isolated/reader m=1 writer_active=true   67,638,757 reads/s/reader
+  isolated/reader m=4 writer_active=true   112,304,144 reads/s/reader
+  isolated/writer m=0 readers_idle         17,936,533 writes/s
+  isolated/writer m=1 readers_idle         16,667,976 writes/s
+  isolated/writer m=4 readers_idle         17,354,856 writes/s
+  isolated/writer m=8 readers_idle         16,204,708 writes/s
+  isolated/writer m=1 readers_busy         4,940,794 writes/s
+  isolated/writer m=4 readers_busy         452,004 writes/s
+  isolated/writer m=8 readers_busy         95,022 writes/s
