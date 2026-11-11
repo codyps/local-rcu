@@ -26,7 +26,10 @@ PAGE = """<!DOCTYPE html>
  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 2rem; background: #fff; color: #111 }
  h1 { font-size: 1.5rem }
  h3 { margin: 1.6rem 0 .2rem; font-family: ui-monospace, monospace; font-weight: 600 }
- .chart { max-width: 56rem; height: 13rem }
+ /* the canvas wrapper (not the canvas) must carry the height: with
+    `maintainAspectRatio: false` Chart.js sizes the canvas to its parent,
+    and a parent whose height depends on the canvas grows forever */
+ .chartbox { position: relative; height: 14rem; max-width: 56rem; margin-bottom: .5rem }
  .unit { color: #666; font-weight: 400; font-size: .8rem }
  footer { margin-top: 3rem; color: #666; font-size: .8rem }
 </style>
@@ -51,8 +54,10 @@ for (const name of Object.keys(DATA.charts).sort()) {
   u.textContent = "[" + DATA.units[name] + "]";
   h.appendChild(u);
   const cvs = document.createElement("canvas");
-  cvs.className = "chart";
-  sec.appendChild(h); sec.appendChild(cvs); container.appendChild(sec);
+  const box = document.createElement("div");
+  box.className = "chartbox";
+  box.appendChild(cvs);
+  sec.appendChild(h); sec.appendChild(box); container.appendChild(sec);
   const labels = DATA.labels[name];
   new Chart(cvs, {
     type: "line",
