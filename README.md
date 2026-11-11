@@ -37,27 +37,48 @@ A `Writer` is a struct that allows publishing new values (and also handles freei
 A `Reader` is a struct which allows reading published values.
 
 For a given `slot`, there is state shared between the `Writer` and all its `Readers`. This shared
-state is `Arc`'d, and internally it contains a list of `Reader`-epochs (one per `Reader`) which is
-protected by a `Mutex`. `Arc` ref-count changes only occur when cloning/creating more `Readers`.
-Locking the epoch list occurs when creating more `Readers` and when the writer publishes a value.
+state is `Arc`'d, and internally it contains a list of per-`Reader` epochs (one per `Reader`)
+which is protected by a `Mutex`. `Arc` ref-count changes only occur when cloning/creating more
+`Readers`. Locking the epoch list occurs when creating more `Readers` and when the writer
+publishes a value.
 
 The `epoch` value modified by the `Reader` and read by the `Writer` is a `usize` which uses 1 bit
-to indicate that it is currently reading a value (sets it before reading), and counts up when it
-finishes a read. When the `Reader` itself is dropped, it sets the epoch to a `DEAD` sentinel value
-(which effectively occupies another bit of our usize)
+to indicate that the reader is currently reading a value (set — with `Release` — before loading
+the value), and counts up when it finishes a read. When the `Reader` itself is dropped, the
+epoch is set to a `DEAD` sentinel value (which effectively occupies another bit of our usize).
 
-When the `Writer` publishes a value, it exposes the new value in the shared data, and then snapshots
-all the `Reader` epochs and tracks the snapshot, the `Reader` itself (so we can later read its current epoch),
-and the previous value (so that it stays alive).
+When the `Writer` publishes a value, it stores the new value with `SeqCst`, places a `SeqCst`
+fence, and then snapshots all the `Reader` epochs: every reader that appears to be in a read
+section is tracked, together with a snapshot of its epoch, alongside the previous value (so
+that value stays alive).
 
-Each time `Writer` is updated with `Writer::write` (or via explicit request like `Writer::try_sync()` or
-`Writer::sync()`), the `Writer` examines these previous values checking if the current `epoch` published
-by the `Readers` is past the epoch of that reader when it was snapshotted. When a previous value has no more
-live readers, we drop the value.
+Each time the `Writer` is updated with `Writer::write` (or via explicit request like
+`Writer::try_sync()` or `Writer::sync()`), the `Writer` re-examines these previous values: a
+value can be freed once every tracked reader's epoch has moved past its snapshot (or the reader
+is `DEAD`) — that reader has finished the read section it was tracked in. Only then is the
+`Box` re-formed from the internally held raw pointer and handed back.
+
+Two ordering details make this sound:
+
+- The value pointer is both *stored* and *loaded* with `SeqCst`. Same-location
+  sequentially-consistent operations are totally ordered, so a read section always ends up
+  observing the *current* value: once a `Reader`'s epoch has moved past its snapshot, its next
+  read section observes the value that superseded the old one (or newer) — it can never load
+  the already-retired pointer again. With only `Release`/`Acquire` on the value pointer, a
+  later read section could legally still observe the retired pointer (store buffering, which
+  loom's interleaving model cannot express but miri detects).
+- The `SeqCst` fence above (paired with one in `Reader::read()`) covers the concurrent case: if
+  a reader's load of the value could still return the old pointer (it was in flight when the
+  new value was published), the scan after the fence observes that reader's entry flag and
+  tracks it. The `Release` store of the entry flag and the `Acquire` epoch scans additionally
+  ensure that any reader we do *not* track (idle, or dropped) has all of its past accesses of
+  retired values happen-before any free of them.
 
 To avoid synchronization, we bias towards keeping values alive longer (which is fine and correct):
- - When the `Writer` snapshots the epochs it has already published a new value, so some of the `Reader` epochs it reads may actually be reading the new value (ie: those readers already moved on). We still count them like they are reading the old value because the `Writer` can't tell.
- - It's safe for the epoch to wrap around, we only check if some bits are set and for equality, we don't try to order it. If the epoch wraps around to the same value as a snapshot of the epoch we've taken previously, we'll just be treating the `Reader` as if it's still reading the value from when that snapshot was taken until the `Reader` epoch moves on. In other words: it keeps the previous value around slightly longer. If one is very unlucky and keeps hitting the same epoch every time the `Writer` examines it, we will end up keeping the previous value until we have a read that shows the `Reader` as on a different epoch (ie: so we know it has moved on).
+- When the `Writer` scans the epochs it has already published a new value, so some of the
+  readers may already be reading the new value. We still track them until their epoch moves.
+- Collecting old values is deferred to the next `write()`/`try_sync()`, so a value can outlive
+  the last reader that observed it by a little.
 
 
 ## Alternatives:
