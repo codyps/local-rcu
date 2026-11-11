@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8](https://github.com/codyps/local-rcu/compare/v1.0.7...v1.0.8) - 2026-11-11
+
+### Fixed
+
+- rely on the SeqCst fence pair, not SeqCst on `active`; epoch wrap
+
+### Other
+
+- describe the SeqCst protocol in the README
+- make the commit labels clickable
+
 ## [1.0.7](https://github.com/codyps/local-rcu/compare/v1.0.6...v1.0.7) - 2026-11-11
 
 ### Fixed
