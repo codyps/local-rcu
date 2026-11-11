@@ -205,3 +205,48 @@ fn send_100_from_1_to_m() {
         rx.join().unwrap();
     }
 }
+
+/// A reader that leaves a tracked read section and immediately re-enters must never load the
+/// value the writer frees as a result. The writer overwrites every value handed back to it with
+/// a poison marker; a reader seeing the marker (or, under miri, any data race / use-after-free
+/// on the value) means a value was returned while a read section could still reach it.
+#[test]
+fn reentry_never_observes_collected_value() {
+    const POISON: usize = usize::MAX;
+    let writes = if cfg!(miri) { 200 } else { 20_000 };
+    let n_readers = 2;
+
+    let (mut w, r) = local_rcu::slot(0usize);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let readers: Vec<_> = (0..n_readers)
+        .map(|_| {
+            let mut r = r.clone();
+            let done = done.clone();
+            thread::spawn(move || {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    // short sections, back to back, so re-entry races with collection
+                    let g = r.read();
+                    let a = *g;
+                    let b = *g;
+                    assert_ne!(a, POISON, "read a collected value");
+                    assert_eq!(a, b, "value changed during a read section");
+                }
+            })
+        })
+        .collect();
+    drop(r);
+
+    for i in 1..=writes {
+        for mut old in w.write(Box::new(i)) {
+            *old = POISON;
+        }
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    for t in readers {
+        t.join().unwrap();
+    }
+    for mut old in w.sync() {
+        *old = POISON;
+    }
+}

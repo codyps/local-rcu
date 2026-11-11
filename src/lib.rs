@@ -4,12 +4,12 @@
 //! One (1) writer provides a singe value to multiple readers. Readers _can_ see different versions
 //! of the datastructure simultaniously unless other synchronization is used.
 //!
-//! No atomic exchange, compare-and-swap, math operations are used, only loads &
-//! stores (most relaxed, with an Acquire in the reader (per read) and a Release in the
-//! writer (per write)).
+//! No atomic exchange, compare-and-swap, or atomic math is used: only loads, stores and
+//! fences.
 //!
-//! - Reading wait free: only atomics are loads & stores. 1 atomic relaxed rmw
-//!   of no-contention data (only 1 writer), 1 atomic Acquire load of shared data.
+//! - Reading is wait free. Each read section does a `Relaxed` load and two `Release` stores
+//!   of the reader's own (uncontended) epoch, one `SeqCst` fence, and one `Acquire` load of
+//!   the shared value pointer.
 //! - Writing aquires an internal mutex to scan for old values to retire. Using
 //!   `write_nosync()` (which does not collect old is wait free.
 //! - Creating additional readers aquires an internal mutex & clones some `Arc`s.
@@ -258,8 +258,8 @@ impl<T> Writer<T> {
         while i < state.prevs.len() {
             let tracked = &mut state.prevs[i].1;
             tracked.retain(|(idx, prev)| {
-                // Acquire pairs with the `Release` stores in `ReadGuard::drop` and
-                // `Reader::drop`. Without it, the reader's loads from the old value are not
+                // Acquire pairs with the `Release` epoch stores in `ReadGuard::drop`,
+                // `Reader::read()` (entry) and `Reader::drop`. Without it, the reader's loads from the old value are not
                 // ordered before the free, which would be a data race on the freed memory
                 // (allowed by the memory model on weakly ordered targets; not expressible by
                 // loom's interleaving model, so loom can't catch this).
@@ -277,11 +277,11 @@ impl<T> Writer<T> {
                 // above, and `tracked` being empty means each has been observed to leave the
                 // read section it was tracked in: the `Acquire` load in `retain` pairs with
                 // the `Release` epoch stores in `ReadGuard::drop` and `Reader::read()`, so
-                // their last access to the value happens-before this point. Because every read
-                // section observes the current `active` value (see the `SeqCst` store/load pair
-                // on `active`), a reader that leaves its tracked section can never load this
-                // value again — its next read section observes the value that replaced this
-                // one (or newer). No guard referencing the value can exist or be created.
+                // their last access to the value happens-before this point. Such a reader can
+                // never load this value again: `publish()` saw it in its tracked section *after*
+                // the writer's `SeqCst` fence, so every later section of that reader loads the
+                // replacing value or a newer one (see "Re-entry" in `publish()`). No guard
+                // referencing the value can exist or be created.
                 // Re-forming (and later dropping) the `Box` here is therefore race-free; doing
                 // it any earlier (eg at retire time in `publish()`) would be UB (see `PrevVal`).
                 out.push(unsafe { Box::from_raw(val) });
@@ -317,9 +317,15 @@ impl<T> Writer<T> {
         for (idx, e) in epochs.iter() {
             // Acquire pairs with the `Release` store in `Reader::drop`: the reader's last access
             // to the epoch (and its `Arc`) happens-before we drop the `Arc` in the slab.
-            if e.load(atomic::Ordering::Acquire) == DEAD && !referenced.binary_search(&idx).is_ok()
-            {
-                to_remove.push(idx);
+            if e.load(atomic::Ordering::Acquire) == DEAD {
+                if referenced.binary_search(&idx).is_ok() {
+                    // A `prevs` entry still refers to this slot. Sweep again next time, so the
+                    // slot is reclaimed once that entry is collected, even if `try_sync()` is
+                    // all that runs from now on.
+                    state.saw_dead = true;
+                } else {
+                    to_remove.push(idx);
+                }
             }
         }
         for idx in to_remove {
@@ -366,15 +372,11 @@ impl<T> Writer<T> {
         // Half of a Release-Acquire pair, see `Reader::read()` for the `Acquire` half. `Release`
         // ensures that `val` is fully initialized before it is exposed to other threads.
         //
-        // `SeqCst` (in place of `Release`) is load-bearing: paired with the reader's `SeqCst`
-        // load of `active`, it guarantees a read section always ends up observing the current
-        // value — an SC load cannot be ordered before an SC store to the same location in the
-        // single total order and still read the older value. A reader that re-enters after this
-        // publish therefore loads this value (or newer), never the one being retired, which is
-        // what makes the epoch-snapshot tracking in `collect_prevs()` sound (see the note there).
+        // This store (and the reader's load) does not need to be `SeqCst`. Keeping readers off
+        // `prev` is the job of the fence pair below (see "Re-entry").
         self.shared
             .active
-            .store(Box::into_raw(val), atomic::Ordering::SeqCst);
+            .store(Box::into_raw(val), atomic::Ordering::Release);
 
         // This fence (and its counterpart in `Reader::read()`) cannot be relaxed to `Acquire`
         // and/or `Release`: reader and writer form the store-buffering (SB) litmus pattern:
@@ -388,6 +390,18 @@ impl<T> Writer<T> {
         // Participating in the SeqCst total order on both sides rules that out: whichever
         // side's SeqCst operation comes first in the total order forces the other side's load to
         // observe the preceding store.
+        //
+        // The rule behind this (C++11 [atomics.order]): if a store is sequenced before SC fence
+        // X, SC fence Y is sequenced before a load of the same location, and X precedes Y in the
+        // SC order, then the load sees that store or a later one. For any read section, let F_R
+        // be the fence in its `Reader::read()`:
+        //
+        // - In flight: if F_R precedes this fence, the epoch scan below sees the section's entry
+        //   flag (or a later epoch). Any section that might load `prev` is therefore tracked.
+        // - Re-entry: if this fence precedes F_R, the section's load of `active` sees our store
+        //   above (or a later one), so it cannot load `prev`. Once the scan has seen a reader
+        //   in a given section, all of that reader's later sections fall in this case. That is
+        //   why `collect_prevs()` may free `prev` as soon as the tracked epoch changes.
         atomic::fence(atomic::Ordering::SeqCst);
 
         // add `prev` to our `prevs`, collecting the readers that may still be reading it, so we
@@ -397,12 +411,12 @@ impl<T> Writer<T> {
         let mut remaining_readers = state.pool.pop().unwrap_or_default();
 
         for (idx, epoch) in epochs.iter() {
-            // `Acquire` (in place of `Relaxed`) is load-bearing: a reader we do *not* track here
-            // (idle, or dead) can have this value freed immediately, and the acquire pairs with
-            // the `Release` stores in `Reader::read()` (entry) and `Reader::drop` (`DEAD`) to
-            // order that reader's past accesses of retired values before the free. The SeqCst
-            // fence above ensures a reader that could still load `prev` (its `active` load
-            // precedes our store in the SC total order) is seen as in-section here and tracked.
+            // This must be `Acquire`, not `Relaxed`. A reader we do *not* track here (idle, or
+            // dead) can have `prev` freed straight away, so its earlier accesses to `prev` must
+            // happen-before that free. The acquire provides this by pairing with the `Release`
+            // epoch stores in `ReadGuard::drop`, `Reader::read()` (entry) and `Reader::drop`.
+            // The fence above makes sure a reader that might still load `prev` shows up here
+            // as in-section and gets tracked (see "In flight").
             let v = epoch.load(atomic::Ordering::Acquire);
             if v == DEAD {
                 state.saw_dead = true;
@@ -459,22 +473,24 @@ impl<T> Reader<T> {
     /// `srcu_dereference()`. The `drop` of the return value (`ReadGuard`) is
     /// conceptually a `srcu_read_unlock()`.
     pub fn read(&mut self) -> ReadGuard<'_, T> {
-        // We're using `Relaxed` because all the ordering needed comes from the `Acquire` on
-        // `self.shared.active` below.
+        // `Relaxed` is enough: only this reader stores to its epoch, so it always sees its own
+        // latest value.
         //
         // Note: we split this `add` up because we don't need the consistency `add` provides (we're
         // the only writer).
         let v = self.epoch.load(atomic::Ordering::Relaxed);
         assert!(v & READER_FLAG == 0);
 
-        // NOTE: we can't call `read()` a second time if we leak the previous
-        // `ReadGuard`, so we can assume well behaved values.
+        // NOTE: if a `ReadGuard` is leaked (eg `mem::forget`), the flag stays set and the
+        // `assert!` above panics on the next `read()`; the epoch is never corrupted.
         //
-        // `Release` (in place of `Relaxed`) is load-bearing: it pairs with the writer's
-        // `Acquire` loads in `publish()`/`collect_prevs()`, so whenever the writer observes our
-        // epoch has moved past a snapshot (triggering collection of the tracked value), all of
-        // our accesses up to this store — in particular every dereference this read section
-        // performs through the guard — happen-before that collection.
+        // This store must be `Release`, not `Relaxed`. The writer may free a value after
+        // reading this epoch (it shows we left a tracked section, or were idle when a value
+        // was retired), so our accesses in *earlier* sections must happen-before that free.
+        // The `Release` in `ReadGuard::drop` does not cover this case: since C++20, a later
+        // plain store from the same thread does not extend a release sequence, so a writer
+        // that reads this value would not synchronize with that earlier store. (Accesses in
+        // *this* section are covered by the store in `ReadGuard::drop`.)
         self.epoch.store(v | READER_FLAG, atomic::Ordering::Release);
 
         // Ensure the `epoch` store is visible in other threads before we read
@@ -485,28 +501,23 @@ impl<T> Reader<T> {
         // - `Acquire`/`Release` (or an Acq/Rel fence) is insufficient: with only those, both
         //   sides may miss the other's store, which lets the writer free a value the reader is
         //   about to dereference (loom fails).
-        // - replacing it with a `SeqCst` store or `SeqCst` RMW (`fetch_or`) also fails loom's
-        //   model: only the fence/fence combination is verified to order this pattern.
+        // - A `SeqCst` store or `SeqCst` RMW (`fetch_or`) instead of the fence fails under
+        //   loom, which treats `SeqCst` accesses roughly as `AcqRel`. The fence pair is
+        //   something both loom and the C++ fence rules (see `Writer::publish()`) can check.
         atomic::fence(atomic::Ordering::SeqCst);
 
-        // Pairs with a `Release` in `Writer::write()`, which ensures that we
-        // see all the writes writer makes to things we load via `data`.
+        // Pairs with the `Release` store in `Writer::publish()`, so we see every write the
+        // writer made to the data reachable through `data`.
         //
-        // `SeqCst` (in place of `Acquire`) is load-bearing: paired with the writer's `SeqCst`
-        // store, it means a read section always ends up with the value that is current when
-        // this load executes — a load ordered after a store to the same location in the SC
-        // total order cannot return the store's older value. This is what makes the
-        // epoch-snapshot tracking sound: once a read section ends, the reader can never come
-        // back to the value it observed, so the writer may free it after seeing the epoch
-        // change. (`Acquire` alone would allow a later read section to load the already-retired
-        // pointer out of a store buffer — legal store-buffering behavior, and the source of a
-        // data race miri detects.)
+        // The guarantee that this load never returns a value that has been (or may be) freed
+        // while we hold the guard comes from the fence above, not from this load's ordering.
+        // See "In flight" and "Re-entry" in `Writer::publish()`.
         //
         // Note: `Consume` is good enough for this operation (ie: wrt `active` we only need to
         // ensure that loads via it have a data dependency on other writes).
         // `Consume` isn't supported by current rust/loom though, so we use the
         // stronger `Acquire`.
-        let data = self.shared.active.load(atomic::Ordering::SeqCst);
+        let data = self.shared.active.load(atomic::Ordering::Acquire);
 
         ReadGuard {
             reader: self,
@@ -572,11 +583,18 @@ impl<'a, T> Drop for ReadGuard<'a, T> {
         // on archs without atomic add opcodes).
         let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
         assert!(v & READER_FLAG != 0);
-        // `Release` pairs with the writer's `Acquire` load in `Writer::try_sync()`: it orders
-        // this read section's loads from the old value before the writer's free.
+        // `Release` pairs with the writer's `Acquire` epoch loads in `Writer::collect_prevs()`
+        // and `Writer::publish()`, so this section's reads of the value happen-before any
+        // free of it.
+        //
+        // `wrapping_add`: on 32-bit targets the epoch wraps after about 2^30 read sections, and
+        // that must not panic when overflow checks are on. Wrapping is harmless. The writer
+        // only compares epochs for equality, so an epoch that wraps back onto a snapshot just
+        // keeps the tracked value alive until the epoch changes again, and the odd `DEAD`
+        // value is still never reached.
         self.reader
             .epoch
-            .store(v + READER_FLAG, atomic::Ordering::Release);
+            .store(v.wrapping_add(READER_FLAG), atomic::Ordering::Release);
         // NOTE: adding a fence(SeqCst) here speeds up loom significantly,
         // implying not having it opens up many more execution variants. This
         // implies:

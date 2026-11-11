@@ -21,8 +21,9 @@
 //!
 //! # Differences from the [`left-right`] crate
 //!
-//! * Reads are wait-free `local-rcu` reads (epoch store + `SeqCst` value load);
-//!   `left-right` reads are also wait-free (epoch bump + pointer load).
+//! * Reads are wait-free `local-rcu` reads (epoch store, `SeqCst` fence,
+//!   `Acquire` value load); `left-right` reads are also wait-free (epoch
+//!   bump + pointer load).
 //! * As in `left-right`, every operation is applied twice — once when
 //!   appended, and again when the stale copy is taken back and "rebased" —
 //!   so operations must be deterministic.

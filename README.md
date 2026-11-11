@@ -47,7 +47,7 @@ to indicate that the reader is currently reading a value (set — with `Release`
 the value), and counts up when it finishes a read. When the `Reader` itself is dropped, the
 epoch is set to a `DEAD` sentinel value (which effectively occupies another bit of our usize).
 
-When the `Writer` publishes a value, it stores the new value with `SeqCst`, places a `SeqCst`
+When the `Writer` publishes a value, it stores the new value (`Release`), places a `SeqCst`
 fence, and then snapshots all the `Reader` epochs: every reader that appears to be in a read
 section is tracked, together with a snapshot of its epoch, alongside the previous value (so
 that value stays alive).
@@ -58,27 +58,32 @@ value can be freed once every tracked reader's epoch has moved past its snapshot
 is `DEAD`) — that reader has finished the read section it was tracked in. Only then is the
 `Box` re-formed from the internally held raw pointer and handed back.
 
-Two ordering details make this sound:
+Why this is sound:
 
-- The value pointer is both *stored* and *loaded* with `SeqCst`. Same-location
-  sequentially-consistent operations are totally ordered, so a read section always ends up
-  observing the *current* value: once a `Reader`'s epoch has moved past its snapshot, its next
-  read section observes the value that superseded the old one (or newer) — it can never load
-  the already-retired pointer again. With only `Release`/`Acquire` on the value pointer, a
-  later read section could legally still observe the retired pointer (store buffering, which
-  loom's interleaving model cannot express but miri detects).
-- The `SeqCst` fence above (paired with one in `Reader::read()`) covers the concurrent case: if
-  a reader's load of the value could still return the old pointer (it was in flight when the
-  new value was published), the scan after the fence observes that reader's entry flag and
-  tracks it. The `Release` store of the entry flag and the `Acquire` epoch scans additionally
-  ensure that any reader we do *not* track (idle, or dropped) has all of its past accesses of
-  retired values happen-before any free of them.
+- Each read section enters by storing its epoch with the "reading" flag set, then a `SeqCst`
+  fence, then loading the value pointer. The `Writer` mirrors this: it stores the new pointer,
+  places a `SeqCst` fence, then scans the epochs. All `SeqCst` fences fall into a single total
+  order, so for any read section one of two things holds:
+  - The reader's fence comes first. The `Writer`'s scan then sees the reader as reading, so a
+    section that might still load the old value gets tracked.
+  - The `Writer`'s fence comes first. The reader's load then returns the new value (or a newer
+    one), so it cannot load the old value.
+- Because of the second case, once the scan has seen a reader in some read section, none of
+  that reader's later sections can load the old value. When the tracked epoch changes, the
+  value can be freed.
+- Every epoch store the `Reader` makes (entering a section, leaving it, and the `DEAD` mark) is
+  `Release`, and every epoch load the `Writer` makes is `Acquire`. So whenever the `Writer`
+  decides a value can be freed, all of the reader's earlier accesses to it happen-before the
+  free.
 
 To avoid synchronization, we bias towards keeping values alive longer (which is fine and correct):
 - When the `Writer` scans the epochs it has already published a new value, so some of the
   readers may already be reading the new value. We still track them until their epoch moves.
 - Collecting old values is deferred to the next `write()`/`try_sync()`, so a value can outlive
   the last reader that observed it by a little.
+- Epochs may wrap around. The `Writer` only compares an epoch with its snapshot for equality.
+  If a reader's epoch wraps back to exactly the snapshot value, the `Writer` treats that reader
+  as still reading and keeps the old value a little longer, until the epoch moves on.
 
 
 ## Alternatives:
