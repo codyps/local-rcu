@@ -1,0 +1,31 @@
+Benchmarks recorded by CI (shared runners; indicative only).
+
+x86_64 (INTEL(R) XEON(R) PLATINUM 8573C, 4 vCPU):
+  b/n100_m10                               13.93 ms
+  b/n1000_m10                              55.368 ms
+  isolated/reader m=1 writer_active=false  213,413,557 reads/s/reader
+  isolated/reader m=4 writer_active=false  123,959,743 reads/s/reader
+  isolated/reader m=1 writer_active=true   50,942,666 reads/s/reader
+  isolated/reader m=4 writer_active=true   44,143,301 reads/s/reader
+  isolated/writer m=0 readers_idle         21,725,127 writes/s
+  isolated/writer m=1 readers_idle         21,480,069 writes/s
+  isolated/writer m=4 readers_idle         15,904,015 writes/s
+  isolated/writer m=8 readers_idle         15,633,801 writes/s
+  isolated/writer m=1 readers_busy         2,589,292 writes/s
+  isolated/writer m=4 readers_busy         310,876 writes/s
+  isolated/writer m=8 readers_busy         70,893 writes/s
+
+aarch64 (Neoverse-N2, 4 vCPU):
+  b/n100_m10                               13.452 ms
+  b/n1000_m10                              47.076 ms
+  isolated/reader m=1 writer_active=false  255,284,148 reads/s/reader
+  isolated/reader m=4 writer_active=false  253,263,819 reads/s/reader
+  isolated/reader m=1 writer_active=true   60,200,485 reads/s/reader
+  isolated/reader m=4 writer_active=true   39,967,787 reads/s/reader
+  isolated/writer m=0 readers_idle         17,315,322 writes/s
+  isolated/writer m=1 readers_idle         16,423,441 writes/s
+  isolated/writer m=4 readers_idle         17,220,284 writes/s
+  isolated/writer m=8 readers_idle         16,225,295 writes/s
+  isolated/writer m=1 readers_busy         3,407,080 writes/s
+  isolated/writer m=4 readers_busy         300,488 writes/s
+  isolated/writer m=8 readers_busy         74,816 writes/s
