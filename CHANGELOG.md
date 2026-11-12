@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1](https://github.com/codyps/local-rcu/compare/v1.1.0...v1.1.1) - 2026-11-12
+
+### Other
+
+- write_nosync() no longer looks at readers; one scan covers a batch ([#17](https://github.com/codyps/local-rcu/pull/17))
+- keep reader epochs and the value pointer on cache lines of their own
+
 ## [1.1.0](https://github.com/codyps/local-rcu/compare/v1.0.8...v1.1.0) - 2026-11-12
 
 ### Added
