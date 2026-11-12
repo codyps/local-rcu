@@ -196,3 +196,115 @@ fn loom_send_1_from_1_to_1() {
         rx_t.join().unwrap();
     });
 }
+
+/// A value that records when it is dropped, so a reader can check it is not looking at a value
+/// the writer already got back.
+#[cfg(loom)]
+struct Tracked {
+    v: usize,
+    dropped: loom::sync::Arc<loom::sync::atomic::AtomicBool>,
+}
+
+#[cfg(loom)]
+impl Tracked {
+    fn new(v: usize) -> Self {
+        Tracked {
+            v,
+            dropped: loom::sync::Arc::new(loom::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+#[cfg(loom)]
+impl Drop for Tracked {
+    fn drop(&mut self) {
+        self.dropped
+            .store(true, loom::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A cached reader keeps reading while the writer publishes and immediately drops whatever it
+/// gets back. The reader must never see a dropped value or go backwards, both when it reuses
+/// its cached value and when it moves to a new one.
+#[cfg(loom)]
+#[test]
+fn loom_cached_reader_concurrent_with_writes() {
+    use local_rcu::cached::CachedReader;
+    use loom::sync::atomic::Ordering;
+
+    loom::model(|| {
+        let n = 2usize;
+        let (mut tx, rx) = local_rcu::slot(Tracked::new(0));
+        let mut rx = CachedReader::new(rx);
+
+        let reader = thread::spawn(move || {
+            let mut prev = 0;
+            for _ in 0..3 {
+                let v = rx.read();
+                assert!(!v.dropped.load(Ordering::SeqCst), "read a dropped value");
+                assert!(v.v >= prev);
+                prev = v.v;
+                loom::thread::yield_now();
+                // still valid after the writer had a chance to run
+                assert!(
+                    !v.dropped.load(Ordering::SeqCst),
+                    "value dropped while borrowed"
+                );
+            }
+            prev
+        });
+
+        let writer = thread::spawn(move || {
+            for i in 1..=n {
+                drop(tx.write(Box::new(Tracked::new(i))));
+                loom::thread::yield_now();
+            }
+            tx
+        });
+
+        let mut tx = writer.join().unwrap();
+        let last = reader.join().unwrap();
+        assert!(last <= n);
+
+        // the reader is gone: everything it held back is returned
+        let back = tx.sync();
+        assert!(back.iter().all(|b| b.v < n));
+        assert!(!tx.has_old_values());
+    });
+}
+
+/// A pinned cached reader is released (or dropped) while the writer is publishing.
+#[cfg(loom)]
+#[test]
+fn loom_cached_reader_release_concurrent_with_write() {
+    use local_rcu::cached::CachedReader;
+    use loom::sync::atomic::Ordering;
+
+    loom::model(|| {
+        let (mut tx, rx) = local_rcu::slot(Tracked::new(0));
+        let mut rx = CachedReader::new(rx);
+        // pinned before the writer starts
+        assert_eq!(rx.read().v, 0);
+
+        let reader = thread::spawn(move || {
+            rx.release();
+            let v = rx.read();
+            assert!(!v.dropped.load(Ordering::SeqCst), "read a dropped value");
+            let seen = v.v;
+            loom::thread::yield_now();
+            assert!(
+                !v.dropped.load(Ordering::SeqCst),
+                "value dropped while borrowed"
+            );
+            seen
+        });
+
+        drop(tx.write(Box::new(Tracked::new(1))));
+        drop(tx.write(Box::new(Tracked::new(2))));
+
+        let seen = reader.join().unwrap();
+        assert!(seen <= 2);
+        drop(tx.sync());
+        assert!(!tx.has_old_values());
+    });
+}

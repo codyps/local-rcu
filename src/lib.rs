@@ -29,6 +29,8 @@ use std::{
     thread,
 };
 
+pub mod cached;
+
 /// Create a new SPMC slot containing an initial value `init_val`
 pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
     let w = Writer::new(Box::new(init_val));
@@ -473,6 +475,25 @@ impl<T> Reader<T> {
     /// `srcu_dereference()`. The `drop` of the return value (`ReadGuard`) is
     /// conceptually a `srcu_read_unlock()`.
     pub fn read(&mut self) -> ReadGuard<'_, T> {
+        let data = self.enter();
+
+        ReadGuard {
+            reader: self,
+            // SAFETY: we've told the writer (via the epoch) that we're reading
+            // a value (by setting the low bit of the epoch), so it won't delete
+            // the value until we update our epoch. We only update our epoch
+            // when this `ReadGuard` is dropped. No `&mut`s are handed out to
+            // the data while it's in the `active` slot.
+            data: unsafe { &*data },
+        }
+    }
+
+    /// Enter a read section and load the current value.
+    ///
+    /// The returned pointer stays valid until [`Reader::leave()`] is called. Callers must have
+    /// exclusive use of this reader (`&mut` at the public API boundary) and must not already be
+    /// in a read section.
+    fn enter(&self) -> *const T {
         // `Relaxed` is enough: only this reader stores to its epoch, so it always sees its own
         // latest value.
         //
@@ -517,17 +538,33 @@ impl<T> Reader<T> {
         // ensure that loads via it have a data dependency on other writes).
         // `Consume` isn't supported by current rust/loom though, so we use the
         // stronger `Acquire`.
-        let data = self.shared.active.load(atomic::Ordering::Acquire);
+        self.shared.active.load(atomic::Ordering::Acquire)
+    }
 
-        ReadGuard {
-            reader: self,
-            // SAFETY: we've told the writer (via the epoch) that we're reading
-            // a value (by setting the low bit of the epoch), so it won't delete
-            // the value until we update our epoch. We only update our epoch
-            // when this `ReadGuard` is dropped. No `&mut`s are handed out to
-            // the data while it's in the `active` slot.
-            data: unsafe { &*data },
-        }
+    /// Leave the read section started by [`Reader::enter()`]. The pointer it returned must not
+    /// be used afterwards.
+    fn leave(&self) {
+        // NOTE: this split operation is ok because we are the only writer (others read this value).
+        // This is split into 2 operations so that better code can be generated (ie: omitting CAS
+        // on archs without atomic add opcodes).
+        let v = self.epoch.load(atomic::Ordering::Relaxed);
+        assert!(v & READER_FLAG != 0);
+        // `Release` pairs with the writer's `Acquire` epoch loads in `Writer::collect_prevs()`
+        // and `Writer::publish()`, so this section's reads of the value happen-before any
+        // free of it.
+        //
+        // `wrapping_add`: on 32-bit targets the epoch wraps after about 2^30 read sections, and
+        // that must not panic when overflow checks are on. Wrapping is harmless. The writer
+        // only compares epochs for equality, so an epoch that wraps back onto a snapshot just
+        // keeps the tracked value alive until the epoch changes again, and the odd `DEAD`
+        // value is still never reached.
+        self.epoch
+            .store(v.wrapping_add(READER_FLAG), atomic::Ordering::Release);
+        // NOTE: adding a fence(SeqCst) here speeds up loom significantly,
+        // implying not having it opens up many more execution variants. This
+        // implies:
+        // - omitting the fence may be useful for perf
+        // - omitting the fence opens up lots of ways for our code to be wrong.
     }
 }
 
@@ -578,28 +615,7 @@ const READER_FLAG: usize = 2;
 
 impl<'a, T> Drop for ReadGuard<'a, T> {
     fn drop(&mut self) {
-        // NOTE: this split operation is ok because we are the only writer (others read this value).
-        // This is split into 2 operations so that better code can be generated (ie: omitting CAS
-        // on archs without atomic add opcodes).
-        let v = self.reader.epoch.load(atomic::Ordering::Relaxed);
-        assert!(v & READER_FLAG != 0);
-        // `Release` pairs with the writer's `Acquire` epoch loads in `Writer::collect_prevs()`
-        // and `Writer::publish()`, so this section's reads of the value happen-before any
-        // free of it.
-        //
-        // `wrapping_add`: on 32-bit targets the epoch wraps after about 2^30 read sections, and
-        // that must not panic when overflow checks are on. Wrapping is harmless. The writer
-        // only compares epochs for equality, so an epoch that wraps back onto a snapshot just
-        // keeps the tracked value alive until the epoch changes again, and the odd `DEAD`
-        // value is still never reached.
-        self.reader
-            .epoch
-            .store(v.wrapping_add(READER_FLAG), atomic::Ordering::Release);
-        // NOTE: adding a fence(SeqCst) here speeds up loom significantly,
-        // implying not having it opens up many more execution variants. This
-        // implies:
-        // - omitting the fence may be useful for perf
-        // - omitting the fence opens up lots of ways for our code to be wrong.
+        self.reader.leave();
     }
 }
 
