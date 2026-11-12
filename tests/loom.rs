@@ -308,3 +308,50 @@ fn loom_cached_reader_release_concurrent_with_write() {
         assert!(!tx.has_old_values());
     });
 }
+
+/// The writer publishes with `write_nosync()` (no fence, no look at the reader) and collects in
+/// one batch with `try_sync()`, dropping whatever comes back, while a reader reads. The reader
+/// must never see a dropped value or go backwards.
+#[cfg(loom)]
+#[test]
+fn loom_write_nosync_batch_concurrent_with_reads() {
+    use loom::sync::atomic::Ordering;
+
+    loom::model(|| {
+        let n = 2usize;
+        let (mut tx, mut rx) = local_rcu::slot(Tracked::new(0));
+
+        let reader = thread::spawn(move || {
+            let mut prev = 0;
+            for _ in 0..2 {
+                let v = rx.read();
+                assert!(!v.dropped.load(Ordering::SeqCst), "read a dropped value");
+                assert!(v.v >= prev);
+                prev = v.v;
+                loom::thread::yield_now();
+                // still valid after the writer had a chance to run
+                assert!(
+                    !v.dropped.load(Ordering::SeqCst),
+                    "value dropped while borrowed"
+                );
+            }
+            prev
+        });
+
+        for i in 1..=n {
+            tx.write_nosync(Box::new(Tracked::new(i)));
+        }
+        // one scan for both replaced values
+        drop(tx.try_sync());
+        loom::thread::yield_now();
+        drop(tx.try_sync());
+
+        let last = reader.join().unwrap();
+        assert!(last <= n);
+
+        // the reader is gone: everything it held back is returned
+        let back = tx.sync();
+        assert!(back.iter().all(|b| b.v < n));
+        assert!(!tx.has_old_values());
+    });
+}
