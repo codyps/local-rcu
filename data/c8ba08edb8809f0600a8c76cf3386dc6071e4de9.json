@@ -1,0 +1,77 @@
+{
+ "arch": "x86_64",
+ "commit": "c8ba08edb8809f0600a8c76cf3386dc6071e4de9",
+ "date": "2026-11-12T17:39:32-05:00",
+ "hardware": {
+  "cores": "4",
+  "cpu_model": "AMD EPYC 9V45 96-Core Processor",
+  "uname": "Linux runnervmwuk1x 7.0.0-1019-azure #20-Ubuntu SMP PREEMPT Mon Oct 19 22:41:16 UTC 2026 x86_64 GNU/Linux"
+ },
+ "results": [
+  {
+   "name": "b/n100_m10",
+   "unit": "ms",
+   "value": 13.282
+  },
+  {
+   "name": "b/n1000_m10",
+   "unit": "ms",
+   "value": 35.874
+  },
+  {
+   "name": "isolated/reader m=1 writer_active=false",
+   "unit": "reads/s/reader",
+   "value": 292105436
+  },
+  {
+   "name": "isolated/reader m=4 writer_active=false",
+   "unit": "reads/s/reader",
+   "value": 249749764
+  },
+  {
+   "name": "isolated/reader m=1 writer_active=true",
+   "unit": "reads/s/reader",
+   "value": 162949179
+  },
+  {
+   "name": "isolated/reader m=4 writer_active=true",
+   "unit": "reads/s/reader",
+   "value": 136266271
+  },
+  {
+   "name": "isolated/writer m=0 readers_idle",
+   "unit": "writes/s",
+   "value": 27700835
+  },
+  {
+   "name": "isolated/writer m=1 readers_idle",
+   "unit": "writes/s",
+   "value": 24664048
+  },
+  {
+   "name": "isolated/writer m=4 readers_idle",
+   "unit": "writes/s",
+   "value": 23602936
+  },
+  {
+   "name": "isolated/writer m=8 readers_idle",
+   "unit": "writes/s",
+   "value": 23303497
+  },
+  {
+   "name": "isolated/writer m=1 readers_busy",
+   "unit": "writes/s",
+   "value": 3429526
+  },
+  {
+   "name": "isolated/writer m=4 readers_busy",
+   "unit": "writes/s",
+   "value": 506599
+  },
+  {
+   "name": "isolated/writer m=8 readers_busy",
+   "unit": "writes/s",
+   "value": 91262
+  }
+ ]
+}
