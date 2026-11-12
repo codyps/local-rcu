@@ -11,7 +11,8 @@
 //!   of the reader's own (uncontended) epoch, one `SeqCst` fence, and one `Acquire` load of
 //!   the shared value pointer.
 //! - Writing aquires an internal mutex to scan for old values to retire. Using
-//!   `write_nosync()` (which does not collect old is wait free.
+//!   `write_nosync()` (which does not collect old values) is wait free: one store of the value
+//!   pointer, without looking at any reader. `try_sync()` then collects in batches.
 //! - Creating additional readers aquires an internal mutex & clones some `Arc`s.
 //! - Returning previously written values is deferred. When using `write()`, old
 //!   values are automatically examined to determine if they may still be in use
@@ -103,10 +104,10 @@ pub struct Writer<T> {
 unsafe impl<T: Send + Sync> Send for Writer<T> {}
 unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 
-/// Readers (as indices into `Shared::epochs`) that may still be able to reach a particular
-/// retired value, each with a snapshot of its epoch at the time the value was retired.
+/// Readers (as indices into `Shared::epochs`) that may still be able to reach the values of a
+/// [`Retired`] batch, each with a snapshot of its epoch at the time the batch was scanned.
 ///
-/// We track readers by slab index instead of cloning an `Arc` per tracked reader per write:
+/// We track readers by slab index instead of cloning an `Arc` per tracked reader per scan:
 /// - `Arc::clone`/`drop` are atomic RMWs on a cacheline the reader is actively writing (the epoch
 ///   and the refcount live in the same allocation), causing cacheline ping-pong between the writer
 ///   and readers. Tracking by index keeps the reader's cacheline RMW-free for the writer's entire
@@ -114,22 +115,39 @@ unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 /// - It also avoids a per-write allocation when readers are busy reading.
 type TrackedReaders = Vec<(usize, usize)>;
 
-/// A retired value, kept as a raw pointer until it is collected.
+/// Retired values that one scan of the reader epochs covers, with the readers that scan found
+/// in a read section. See `Writer::track_retired()`.
 ///
-/// The `Box` is deliberately not re-formed at retire time: creating a `Box` (or any `&mut`) from
-/// the pointer retags the allocation as exclusively owned, which is undefined behavior while
-/// readers may still be dereferencing the value through their `ReadGuard`s (a data race under
-/// Rust's aliasing model, detected by miri). `Writer::collect_prevs()` re-forms the `Box` only
-/// once all tracked readers have been observed to leave the read section they were tracked in.
-type PrevVal<T> = (*mut T, TrackedReaders);
+/// `Writer::write()` scans after every value, so its batches hold one value each.
+/// `Writer::write_nosync()` does not scan at all: everything it retired since the last scan
+/// ends up in one batch, at the next `Writer::try_sync()` or `Writer::write()`.
+///
+/// The values are kept as raw pointers until they are collected. The `Box` is deliberately not
+/// re-formed at retire time: creating a `Box` (or any `&mut`) from the pointer retags the
+/// allocation as exclusively owned, which is undefined behavior while readers may still be
+/// dereferencing the value through their `ReadGuard`s (a data race under Rust's aliasing model,
+/// detected by miri). `Writer::collect_prevs()` re-forms the `Box`es only once all tracked
+/// readers have been observed to leave the read section they were tracked in.
+struct Retired<T> {
+    vals: Vec<*mut T>,
+    tracked: TrackedReaders,
+}
 
 /// State owned by the (single) writer. Kept in `Shared` (behind an `UnsafeCell`) so dropping it
 /// doesn't require the writer to be alive (see `Shared::prevs`).
 struct WriterState<T> {
-    prevs: Vec<PrevVal<T>>,
+    /// Values that have been replaced, but that no scan of the reader epochs has covered yet.
+    /// Any reader may still be using them.
+    unscanned: Vec<*mut T>,
 
-    /// Pool of empty tracking vecs, to avoid allocating one per write.
+    /// Batches of replaced values waiting for the readers tracked with them to move on.
+    prevs: Vec<Retired<T>>,
+
+    /// Pool of empty tracking vecs, to avoid allocating one per scan.
     pool: Vec<TrackedReaders>,
+
+    /// Pool of empty value vecs, to avoid allocating one per scan.
+    val_pool: Vec<Vec<*mut T>>,
 
     /// Set when a `DEAD` epoch has been observed and the epoch slab needs a sweep to recycle
     /// dropped readers.
@@ -146,7 +164,8 @@ impl<T> Drop for WriterState<T> {
         // `ReadGuard` borrows its `Reader`, so no guard (and no `&T` into these values) can
         // exist by then, and the `Release`/`Acquire` ordering on the final `Arc` decrements
         // makes the readers' last accesses happen-before this drop.
-        for (val, _) in &mut self.prevs {
+        let batched = self.prevs.iter().flat_map(|batch| batch.vals.iter());
+        for val in self.unscanned.iter().chain(batched) {
             drop(unsafe { Box::from_raw(*val) });
         }
     }
@@ -223,7 +242,9 @@ impl<T> Writer<T> {
             active: CachePadded(atomic::AtomicPtr::new(Box::into_raw(init_val))),
             epochs: Mutex::new(slab::Slab::new()),
             prevs: UnsafeCell::new(WriterState {
+                unscanned: Vec::new(),
                 prevs: Vec::new(),
+                val_pool: Vec::new(),
                 pool: Vec::new(),
                 saw_dead: false,
             }),
@@ -249,9 +270,12 @@ impl<T> Writer<T> {
         // scanning for readers of the value we're replacing.
         let mut epochs = self.shared.epochs.lock().unwrap();
 
+        // Old values first, then the scan for the new one: the readers tracked for the value
+        // we are about to replace have only just been looked at, there is no point in reading
+        // their epochs a second time straight away.
         self.collect_prevs(&epochs, &mut r);
-        self.publish(&epochs, val);
-        self.collect_prevs(&epochs, &mut r);
+        self.publish(val);
+        self.track_retired(&epochs, &mut r);
         Self::sweep_dead(self.state_mut(), &mut epochs);
 
         r
@@ -276,12 +300,17 @@ impl<T> Writer<T> {
     /// These may or may not still have readers that are still using them. If the readers for a
     /// particular value have moved on, those old values will be returned by `try_sync()`.
     pub fn has_old_values(&self) -> bool {
-        !self.state().prevs.is_empty()
+        let state = self.state();
+        !state.prevs.is_empty() || !state.unscanned.is_empty()
     }
 
     /// Check if we can release previous values and return them
     ///
     /// Does not aquire any locks except the epoch slab lock. Returns after a single scan.
+    ///
+    /// Values replaced by [`Writer::write_nosync()`] since the last scan are looked at here for
+    /// the first time. Those that a reader may still be using come back from a later call, once
+    /// every reader that was in a read section during this call has left it.
     ///
     /// If you want to wait for all readers to finish proactively, schedule work using a timer to
     /// call this periodically. This is generally not required unless you need to obtain old values
@@ -291,16 +320,17 @@ impl<T> Writer<T> {
 
         let mut epochs = self.shared.epochs.lock().unwrap();
         self.collect_prevs(&epochs, &mut v);
+        self.track_retired(&epochs, &mut v);
         Self::sweep_dead(self.state_mut(), &mut epochs);
 
         v
     }
 
-    /// Scan `prevs` for values whose readers have all moved on, collect them into `out`.
+    /// Scan `prevs` for batches whose readers have all moved on, collect their values into `out`.
     ///
     /// Requires `epochs` to be locked.
     fn collect_prevs(&self, epochs: &slab::Slab<Epoch>, out: &mut Vec<Box<T>>) {
-        // We need to move `val` out of `prevs` and into `v`. `extract_if` would work.
+        // We need to move the values out of `prevs` and into `out`. `extract_if` would work.
         // `retain_mut` doesn't unless we play some unsafe games with pointers in `prev`.
         //
         // FIXME: switch to `extract_if` once it's stable.
@@ -308,7 +338,7 @@ impl<T> Writer<T> {
         let state = self.state_mut();
         let mut i = 0;
         while i < state.prevs.len() {
-            let tracked = &mut state.prevs[i].1;
+            let tracked = &mut state.prevs[i].tracked;
             tracked.retain(|(idx, prev)| {
                 // Acquire pairs with the `Release` epoch stores in `ReadGuard::drop`,
                 // `Reader::read()` (entry) and `Reader::drop`. Without it, the reader's loads from the old value are not
@@ -321,22 +351,27 @@ impl<T> Writer<T> {
             });
 
             if tracked.is_empty() {
-                let (val, mut t) = state.prevs.remove(i);
-                // recycle the tracking vec's allocation
-                t.clear();
-                state.pool.push(t);
-                // SAFETY: every reader that could have been dereferencing `val` was tracked
-                // above, and `tracked` being empty means each has been observed to leave the
-                // read section it was tracked in: the `Acquire` load in `retain` pairs with
-                // the `Release` epoch stores in `ReadGuard::drop` and `Reader::read()`, so
-                // their last access to the value happens-before this point. Such a reader can
-                // never load this value again: `publish()` saw it in its tracked section *after*
-                // the writer's `SeqCst` fence, so every later section of that reader loads the
-                // replacing value or a newer one (see "Re-entry" in `publish()`). No guard
-                // referencing the value can exist or be created.
-                // Re-forming (and later dropping) the `Box` here is therefore race-free; doing
-                // it any earlier (eg at retire time in `publish()`) would be UB (see `PrevVal`).
-                out.push(unsafe { Box::from_raw(val) });
+                let Retired {
+                    mut vals,
+                    mut tracked,
+                } = state.prevs.remove(i);
+                // SAFETY: every reader that could have been dereferencing one of `vals` was
+                // tracked by `track_retired()`, and `tracked` being empty means each has been
+                // observed to leave the read section it was tracked in: the `Acquire` load in
+                // `retain` pairs with the `Release` epoch stores in `ReadGuard::drop` and
+                // `Reader::read()`, so their last access to the values happens-before this
+                // point. Such a reader can never load these values again: `track_retired()` saw
+                // it in its tracked section *after* the writer's `SeqCst` fence, so every later
+                // section of that reader loads a value that replaced them (see "Re-entry" in
+                // `track_retired()`). No guard referencing the values can exist or be created.
+                // Re-forming (and later dropping) the `Box`es here is therefore race-free;
+                // doing it any earlier (eg at retire time in `publish()`) would be UB (see
+                // `Retired`).
+                out.extend(vals.drain(..).map(|val| unsafe { Box::from_raw(val) }));
+                // recycle the allocations
+                tracked.clear();
+                state.pool.push(tracked);
+                state.val_pool.push(vals);
             } else {
                 i += 1;
             }
@@ -358,7 +393,7 @@ impl<T> Writer<T> {
             let mut r: Vec<usize> = state
                 .prevs
                 .iter()
-                .flat_map(|(_, t)| t.iter().map(|(i, _)| *i))
+                .flat_map(|batch| batch.tracked.iter().map(|(i, _)| *i))
                 .collect();
             r.sort_unstable();
             r.dedup();
@@ -391,7 +426,7 @@ impl<T> Writer<T> {
     pub fn sync(&mut self) -> Vec<Box<T>> {
         let mut r = Vec::new();
 
-        while !self.state().prevs.is_empty() {
+        while self.has_old_values() {
             let v = self.try_sync();
             if v.is_empty() {
                 // TODO: consider if there's a better way to choose how to yield
@@ -406,17 +441,25 @@ impl<T> Writer<T> {
 
     /// Write a new value, without checking if any old values are no longer in use
     ///
-    /// If you use this, calling `try_sync()` is required to avoid leaking old values. In general,
-    /// `Writer::write()` is a better choice.
+    /// This is wait free: one store of the value pointer, with no lock, no fence, and without
+    /// looking at any reader. A writer that publishes very often disturbs its readers much less
+    /// this way than with [`Writer::write()`], which reads every reader's epoch each time.
+    ///
+    /// The values replaced this way pile up until [`Writer::try_sync()`] (or `write()`) is
+    /// called, so calling one of them now and then is required to avoid leaking old values.
+    /// Everything replaced since the previous such call is then tracked as one batch: it is
+    /// returned once every reader that was in a read section during that call has left it. A
+    /// single reader that stays in a read section therefore holds back the whole batch, even
+    /// values that were replaced while nobody was reading.
+    ///
+    /// In general, `Writer::write()` is a better choice.
     pub fn write_nosync(&mut self, val: Box<T>) {
-        let epochs = self.shared.epochs.lock().unwrap();
-        self.publish(&epochs, val);
+        self.publish(val);
     }
 
-    /// Publish a new value and track readers of the value being replaced.
-    ///
-    /// Requires `epochs` to be locked.
-    fn publish(&self, epochs: &slab::Slab<Epoch>, val: Box<T>) {
+    /// Publish a new value. The value it replaces is retired, but not tracked yet: that needs
+    /// `track_retired()`.
+    fn publish(&self, val: Box<T>) {
         // We're the only writer, so `Relaxed` is fine. We avoid a `swap`
         // because that provides extra garuntees we don't need.
         let prev = self.shared.active.load(atomic::Ordering::Relaxed);
@@ -425,10 +468,28 @@ impl<T> Writer<T> {
         // ensures that `val` is fully initialized before it is exposed to other threads.
         //
         // This store (and the reader's load) does not need to be `SeqCst`. Keeping readers off
-        // `prev` is the job of the fence pair below (see "Re-entry").
+        // `prev` is the job of the fence pair in `track_retired()` and `Reader::read()`. Until
+        // that fence, a reader entering a read section may still load `prev` (or an even older
+        // value that has not been scanned for either), which is fine: none of them is freed
+        // before `track_retired()` has looked for such readers.
         self.shared
             .active
             .store(Box::into_raw(val), atomic::Ordering::Release);
+
+        // Note: `prev` stays a raw pointer here (see `Retired`): readers may still hold guards
+        // dereferencing it.
+        self.state_mut().unscanned.push(prev);
+    }
+
+    /// Find the readers that may still be using the values retired since the last call, and
+    /// track them as one batch. If there are none, the values go straight to `out`.
+    ///
+    /// Requires `epochs` to be locked.
+    fn track_retired(&self, epochs: &slab::Slab<Epoch>, out: &mut Vec<Box<T>>) {
+        let state = self.state_mut();
+        if state.unscanned.is_empty() {
+            return;
+        }
 
         // This fence (and its counterpart in `Reader::read()`) cannot be relaxed to `Acquire`
         // and/or `Release`: reader and writer form the store-buffering (SB) litmus pattern:
@@ -449,26 +510,30 @@ impl<T> Writer<T> {
         // be the fence in its `Reader::read()`:
         //
         // - In flight: if F_R precedes this fence, the epoch scan below sees the section's entry
-        //   flag (or a later epoch). Any section that might load `prev` is therefore tracked.
-        // - Re-entry: if this fence precedes F_R, the section's load of `active` sees our store
-        //   above (or a later one), so it cannot load `prev`. Once the scan has seen a reader
-        //   in a given section, all of that reader's later sections fall in this case. That is
-        //   why `collect_prevs()` may free `prev` as soon as the tracked epoch changes.
+        //   flag (or a later epoch). Any section that might load a retired value is therefore
+        //   tracked.
+        // - Re-entry: if this fence precedes F_R, the section's load of `active` sees the last
+        //   store `publish()` made before this fence (or a later one), so it cannot load any
+        //   of the values retired before this fence. Once the scan has seen a reader in a given
+        //   section, all of that reader's later sections fall in this case. That is why
+        //   `collect_prevs()` may free the batch as soon as the tracked epochs change.
+        //
+        // One fence serves every value in `unscanned`, however many `publish()` calls retired
+        // them: the stores that replaced them are all sequenced before it, and all the argument
+        // needs is that a section in the "Re-entry" case loads something newer than each.
         atomic::fence(atomic::Ordering::SeqCst);
 
-        // add `prev` to our `prevs`, collecting the readers that may still be reading it, so we
-        // can retire it later.
-
-        let state = self.state_mut();
+        // collect the readers that may still be reading the retired values, so we can free them
+        // later.
         let mut remaining_readers = state.pool.pop().unwrap_or_default();
 
         for (idx, epoch) in epochs.iter() {
             // This must be `Acquire`, not `Relaxed`. A reader we do *not* track here (idle, or
-            // dead) can have `prev` freed straight away, so its earlier accesses to `prev` must
-            // happen-before that free. The acquire provides this by pairing with the `Release`
-            // epoch stores in `ReadGuard::drop`, `Reader::read()` (entry) and `Reader::drop`.
-            // The fence above makes sure a reader that might still load `prev` shows up here
-            // as in-section and gets tracked (see "In flight").
+            // dead) can have the values freed straight away, so its earlier accesses to them
+            // must happen-before that free. The acquire provides this by pairing with the
+            // `Release` epoch stores in `ReadGuard::drop`, `Reader::read()` (entry) and
+            // `Reader::drop`. The fence above makes sure a reader that might still load one of
+            // the values shows up here as in-section and gets tracked (see "In flight").
             let v = epoch.load(atomic::Ordering::Acquire);
             if v == DEAD {
                 state.saw_dead = true;
@@ -477,9 +542,26 @@ impl<T> Writer<T> {
             }
         }
 
-        // Note: `prev` stays a raw pointer here (see `PrevVal`): readers may still hold guards
-        // dereferencing it.
-        state.prevs.push((prev, remaining_readers));
+        if remaining_readers.is_empty() {
+            // SAFETY: no reader was in a read section after the fence, so (see "In flight"
+            // above) no section that could have loaded these values is still running, and
+            // (see "Re-entry") none can load them from now on. The `Acquire` loads above order
+            // the readers' earlier accesses before this point.
+            out.extend(
+                state
+                    .unscanned
+                    .drain(..)
+                    .map(|val| unsafe { Box::from_raw(val) }),
+            );
+            state.pool.push(remaining_readers);
+        } else {
+            let empty = state.val_pool.pop().unwrap_or_default();
+            let vals = std::mem::replace(&mut state.unscanned, empty);
+            state.prevs.push(Retired {
+                vals,
+                tracked: remaining_readers,
+            });
+        }
     }
 }
 
@@ -568,13 +650,13 @@ impl<T> Reader<T> {
         // `active` (so we don't free-and-reuse a value we're about to dereference).
         //
         // This is the reader half of the store-buffering (SB) pattern with the writer (see
-        // `Writer::publish()`); it cannot be weakened:
+        // `Writer::track_retired()`); it cannot be weakened:
         // - `Acquire`/`Release` (or an Acq/Rel fence) is insufficient: with only those, both
         //   sides may miss the other's store, which lets the writer free a value the reader is
         //   about to dereference (loom fails).
         // - A `SeqCst` store or `SeqCst` RMW (`fetch_or`) instead of the fence fails under
         //   loom, which treats `SeqCst` accesses roughly as `AcqRel`. The fence pair is
-        //   something both loom and the C++ fence rules (see `Writer::publish()`) can check.
+        //   something both loom and the C++ fence rules (see `Writer::track_retired()`) can check.
         atomic::fence(atomic::Ordering::SeqCst);
 
         // Pairs with the `Release` store in `Writer::publish()`, so we see every write the
@@ -582,7 +664,7 @@ impl<T> Reader<T> {
         //
         // The guarantee that this load never returns a value that has been (or may be) freed
         // while we hold the guard comes from the fence above, not from this load's ordering.
-        // See "In flight" and "Re-entry" in `Writer::publish()`.
+        // See "In flight" and "Re-entry" in `Writer::track_retired()`.
         //
         // Note: `Consume` is good enough for this operation (ie: wrt `active` we only need to
         // ensure that loads via it have a data dependency on other writes).
@@ -600,7 +682,7 @@ impl<T> Reader<T> {
         let v = self.epoch.load(atomic::Ordering::Relaxed);
         assert!(v & READER_FLAG != 0);
         // `Release` pairs with the writer's `Acquire` epoch loads in `Writer::collect_prevs()`
-        // and `Writer::publish()`, so this section's reads of the value happen-before any
+        // and `Writer::track_retired()`, so this section's reads of the value happen-before any
         // free of it.
         //
         // `wrapping_add`: on 32-bit targets the epoch wraps after about 2^30 read sections, and

@@ -69,6 +69,14 @@ fence, and then snapshots all the `Reader` epochs: every reader that appears to 
 section is tracked, together with a snapshot of its epoch, alongside the previous value (so
 that value stays alive).
 
+`Writer::write_nosync()` only does the first of those steps: it stores the new value and puts
+the previous one aside, without a fence and without looking at any reader. The fence and the
+snapshot happen at the next `Writer::try_sync()` (or `Writer::write()`), once for all the values
+replaced since the last snapshot. They are tracked together as one batch. This makes a
+`write_nosync()` about as cheap as a pointer store, and leaves the readers' epochs alone
+between snapshots. In return, a reader that is in a read section during the snapshot holds back
+the whole batch, including values that were replaced while nobody was reading.
+
 Each time the `Writer` is updated with `Writer::write` (or via explicit request like
 `Writer::try_sync()` or `Writer::sync()`), the `Writer` re-examines these previous values: a
 value can be freed once every tracked reader's epoch has moved past its snapshot (or the reader
@@ -85,6 +93,8 @@ Why this is sound:
     section that might still load the old value gets tracked.
   - The `Writer`'s fence comes first. The reader's load then returns the new value (or a newer
     one), so it cannot load the old value.
+  The same holds for a batch: every value in it was replaced before the `Writer`'s fence, so a
+  reader whose fence comes later loads something newer than all of them.
 - Because of the second case, once the scan has seen a reader in some read section, none of
   that reader's later sections can load the old value. When the tracked epoch changes, the
   value can be freed.
