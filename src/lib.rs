@@ -38,6 +38,52 @@ pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
     (w, r)
 }
 
+/// Aligns (and so pads) a value to the size of a cache line, so that it never shares one with
+/// anything else.
+///
+/// Without this, two things that different threads write to (or one writes and another reads)
+/// can end up next to each other in memory. Every write then takes the cache line away from
+/// the other thread: "false sharing". It costs nothing in correctness and a lot in time.
+///
+/// The alignment follows `crossbeam_utils::CachePadded`: 128 bytes where the hardware fetches
+/// cache lines in pairs (x86_64) or where lines of that size exist (aarch64, powerpc64), 64
+/// elsewhere.
+#[cfg_attr(
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "arm64ec",
+        target_arch = "powerpc64",
+    ),
+    repr(align(128))
+)]
+#[cfg_attr(
+    not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "arm64ec",
+        target_arch = "powerpc64",
+    )),
+    repr(align(64))
+)]
+struct CachePadded<V>(V);
+
+impl<V> Deref for CachePadded<V> {
+    type Target = V;
+
+    fn deref(&self) -> &V {
+        &self.0
+    }
+}
+
+/// A reader's epoch, shared between the [`Reader`] and the writer's slab of epochs.
+///
+/// On a cache line of its own: the reader stores to it twice per read section. If it shared a
+/// line with another reader's epoch (they are small allocations made one after the other, so
+/// an allocator readily places them side by side), those readers would slow each other down
+/// on every read without ever touching the same data.
+type Epoch = Arc<CachePadded<atomic::AtomicUsize>>;
+
 /// Epoch value stored by a reader that has been dropped.
 ///
 /// Because epochs only ever advance by `+2` and are always even, this odd value can never be
@@ -110,7 +156,11 @@ struct Shared<T> {
     /// Value that readers are expected to read at this time.
     ///
     /// Is really a `Box<T>`, we need `AtomicPtr` so we can load/store it.
-    active: atomic::AtomicPtr<T>,
+    ///
+    /// On a cache line of its own: every read loads it, and it only changes when a new value
+    /// is published. Next to `epochs` it would also be invalidated in every reader each time
+    /// the writer locks or unlocks that mutex.
+    active: CachePadded<atomic::AtomicPtr<T>>,
 
     /// An array of epochs, one per reader.
     ///
@@ -125,7 +175,7 @@ struct Shared<T> {
     /// This is locked when a new reader is created, and when a writer is writing a new value.
     /// Contention is limited as long as we don't create readers too often and/or don't write new
     /// values too often.
-    epochs: Mutex<slab::Slab<Arc<atomic::AtomicUsize>>>,
+    epochs: Mutex<slab::Slab<Epoch>>,
 
     /// Previous active values along with a vec of readers, each with a snapshot of the epoch at
     /// the time _after_ the previous active value was made inactive and the index of the
@@ -170,7 +220,7 @@ impl<T> Writer<T> {
     /// The `Writer` can than be used to obtain one or more [`Reader`]s.
     pub fn new(init_val: Box<T>) -> Writer<T> {
         let shared = Arc::new(Shared {
-            active: atomic::AtomicPtr::new(Box::into_raw(init_val)),
+            active: CachePadded(atomic::AtomicPtr::new(Box::into_raw(init_val))),
             epochs: Mutex::new(slab::Slab::new()),
             prevs: UnsafeCell::new(WriterState {
                 prevs: Vec::new(),
@@ -249,7 +299,7 @@ impl<T> Writer<T> {
     /// Scan `prevs` for values whose readers have all moved on, collect them into `out`.
     ///
     /// Requires `epochs` to be locked.
-    fn collect_prevs(&self, epochs: &slab::Slab<Arc<atomic::AtomicUsize>>, out: &mut Vec<Box<T>>) {
+    fn collect_prevs(&self, epochs: &slab::Slab<Epoch>, out: &mut Vec<Box<T>>) {
         // We need to move `val` out of `prevs` and into `v`. `extract_if` would work.
         // `retain_mut` doesn't unless we play some unsafe games with pointers in `prev`.
         //
@@ -296,7 +346,7 @@ impl<T> Writer<T> {
     /// Recycle epoch slab entries belonging to dropped readers.
     ///
     /// Requires `epochs` to be locked.
-    fn sweep_dead(state: &mut WriterState<T>, epochs: &mut slab::Slab<Arc<atomic::AtomicUsize>>) {
+    fn sweep_dead(state: &mut WriterState<T>, epochs: &mut slab::Slab<Epoch>) {
         if !state.saw_dead {
             return;
         }
@@ -366,7 +416,7 @@ impl<T> Writer<T> {
     /// Publish a new value and track readers of the value being replaced.
     ///
     /// Requires `epochs` to be locked.
-    fn publish(&self, epochs: &slab::Slab<Arc<atomic::AtomicUsize>>, val: Box<T>) {
+    fn publish(&self, epochs: &slab::Slab<Epoch>, val: Box<T>) {
         // We're the only writer, so `Relaxed` is fine. We avoid a `swap`
         // because that provides extra garuntees we don't need.
         let prev = self.shared.active.load(atomic::Ordering::Relaxed);
@@ -436,7 +486,7 @@ impl<T> Writer<T> {
 /// Something which can read the value, use `[Writer::reader]` to get one, or clone an existing `Reader`
 pub struct Reader<T> {
     shared: Arc<Shared<T>>,
-    epoch: Arc<atomic::AtomicUsize>,
+    epoch: Epoch,
     // pointer used so we get !Send/!Sync without the `unsafe impl`s below.
     _marker: PhantomData<*const T>,
 }
@@ -454,7 +504,7 @@ impl<T> Clone for Reader<T> {
 
 impl<T> Reader<T> {
     fn new(shared: Arc<Shared<T>>) -> Reader<T> {
-        let epoch = Arc::new(atomic::AtomicUsize::new(0));
+        let epoch = Arc::new(CachePadded(atomic::AtomicUsize::new(0)));
         // note: the slab entry is not tied to this Reader's lifetime; it is removed by the writer
         // after we mark ourselves DEAD and no prevs entry refers to us.
         shared.epochs.lock().unwrap().insert(epoch.clone());
