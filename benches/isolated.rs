@@ -75,6 +75,53 @@ fn reader_bench(m_readers: usize, writer_active: bool) -> f64 {
     total as f64 / elapsed / m_readers as f64
 }
 
+/// `CachedReader::read()` throughput, with an optional concurrently writing writer.
+fn cached_reader_bench(m_readers: usize, writer_active: bool) -> f64 {
+    let (mut w, rx) = slot(0u64);
+    let stop = Arc::new(PaddedFlag(AtomicBool::new(false)));
+    let mut handles = Vec::new();
+
+    for _ in 0..m_readers {
+        let mut rx = local_rcu::cached::CachedReader::new(rx.clone());
+        let stop = stop.clone();
+        handles.push(thread::spawn(move || {
+            let mut n = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                black_box(*rx.read());
+                n += 1;
+            }
+            n
+        }));
+    }
+
+    let writer = if writer_active {
+        let stop = stop.clone();
+        Some(thread::spawn(move || {
+            let mut i = 1u64;
+            while !stop.load(Ordering::Relaxed) {
+                // `write()`, not `write_nosync()`: pinned readers hold values back, so they
+                // have to be collected as the readers move on
+                drop(w.write(Box::new(i)));
+                i += 1;
+            }
+        }))
+    } else {
+        None
+    };
+
+    thread::sleep(Duration::from_millis(500));
+    let t0 = Instant::now();
+    thread::sleep(Duration::from_millis(1000));
+    let elapsed = t0.elapsed().as_secs_f64();
+    stop.store(true, Ordering::Relaxed);
+
+    let total: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+    if let Some(wt) = writer {
+        wt.join().unwrap();
+    }
+    total as f64 / elapsed / m_readers as f64
+}
+
 /// Writer `write()` throughput with `m` readers that are either idle (holding no guard) or
 /// continuously reading.
 fn writer_bench(m_readers: usize, readers_busy: bool) -> f64 {
@@ -128,6 +175,17 @@ fn main() {
             let rate = reader_bench(m, active);
             println!(
                 "reader  m={:<2} writer_active={:<5} {:>12.0} reads/s/reader",
+                m, active, rate
+            );
+        }
+    }
+
+    // the same with cached readers
+    for &active in &[false, true] {
+        for &m in &[1usize, 4] {
+            let rate = cached_reader_bench(m, active);
+            println!(
+                "cached  m={:<2} writer_active={:<5} {:>12.0} reads/s/reader",
                 m, active, rate
             );
         }

@@ -37,6 +37,16 @@ Example: [`examples/watch.rs`](examples/watch.rs)
 2. Have each reader listen for events on `event-listener` to know to do another read.
 3. Have the writer signal the `event-listener` **after** a new value is written with `local_rcu::Writer::write()`.
 
+### `arcshift`, or a per-reader cache (`arc-swap`'s / `hazarc`'s `Cache`)
+
+Wrap the reader in a [`local_rcu::cached::CachedReader`](https://docs.rs/local-rcu/latest/local_rcu/cached/struct.CachedReader.html).
+It stays in its read section between reads, so reading a value that has not
+changed costs one load and one comparison, with no store and no fence.
+
+The price: between reads it holds back the value it last saw and every value
+published since. A reader that goes idle should call `CachedReader::release()`
+first (a plain `Reader` never holds anything back while idle).
+
 ## High Level Internal flow
 
 A `slot` is the shared data structure represented by a single `Writer` and one or more `Readers`. 
