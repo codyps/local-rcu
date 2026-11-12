@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/codyps/local-rcu/compare/v1.0.8...v1.1.0) - 2026-11-12
+
+### Added
+
+- add cached::CachedReader, a reader that stays in its read section ([#15](https://github.com/codyps/local-rcu/pull/15))
+
+### Other
+
+- Fix typo in README.md regarding Writers
+- move crate comparisons to COMPARISONS.md and fill them in ([#14](https://github.com/codyps/local-rcu/pull/14))
+- Update README with details on reader and writer behavior
+- Update terminology from 'destruction' to 'collection'
+- Update README with details on reader behavior
+
 ## [1.0.8](https://github.com/codyps/local-rcu/compare/v1.0.7...v1.0.8) - 2026-11-11
 
 ### Fixed
