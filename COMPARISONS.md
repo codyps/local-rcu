@@ -54,7 +54,7 @@ the cell yourself).
 
 | Crate | Technique | Old values kept | Freed when | Old value returned to writer | Manual steps |
 |---|---|---|---|---|---|
-| `local-rcu` | per-reader epoch grace periods, tracked per old value | arbitrary — until each reader that might see it moves its epoch; a reader that stays in one read section holds back every value replaced meanwhile | on a later `write()`/`try_sync()` after grace; idle readers hold nothing back | yes (`Vec<Box<T>>`) | none |
+| `local-rcu` | per-reader epoch grace periods, tracked per old value | arbitrary — until each reader that might see it moves its epoch; a `ReadGuard` that is kept holds back every value replaced meanwhile, a `CachedReader` only the value it read | on a later `write()`/`try_sync()` after grace; idle readers hold nothing back | yes (`Vec<Box<T>>`) | none |
 | `RwLock<Arc<T>>` / `Arc<RwLock<T>>` (std) | lock / refcount | none beyond live `Arc`s | in place, or when the last `Arc` drops (on whichever thread that is) | yes (`mem::replace`) | none |
 | `std::sync::mpsc::channel` | queue ownership | all unread values | on receive | — (values are delivered) | none |
 | `tokio::sync::watch` | value replaced in place under the lock | latest only | at `send` | yes (`send_replace`) | none |

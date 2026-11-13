@@ -52,27 +52,72 @@ fn reads_follow_writes() {
 }
 
 #[test]
-fn pinned_reader_holds_values_back_until_it_reads() {
+fn pinned_reader_holds_back_only_the_value_it_read() {
     let (mut w, r) = slot(0usize);
     let mut r = CachedReader::new(r);
     assert_eq!(*r.read(), 0);
 
-    // the reader is pinned and idle: nothing comes back
+    // the reader is pinned and idle: the value it read does not come back, the others do
+    let mut back = Vec::new();
+    for i in 1..=10 {
+        back.extend(w.write(Box::new(i)));
+    }
+    back.extend(w.try_sync());
+    let mut vals: Vec<usize> = back.iter().map(|b| **b).collect();
+    vals.sort_unstable();
+    assert_eq!(vals, (1..10).collect::<Vec<_>>());
+    assert!(w.has_old_values());
+
+    // reading again moves the reader to the latest value and lets go of the one it held
+    assert_eq!(*r.read(), 10);
+    let back = w.try_sync();
+    assert_eq!(back.iter().map(|b| **b).collect::<Vec<_>>(), [0]);
+    assert!(!w.has_old_values());
+}
+
+/// The same with `write_nosync()`: the held value is split off the batch it was retired in.
+#[test]
+fn pinned_reader_holds_back_only_the_value_it_read_from_a_batch() {
+    let (mut w, r) = slot(0usize);
+    let mut pinned = CachedReader::new(r);
+    let mut other = CachedReader::new(w.reader());
+    assert_eq!(*pinned.read(), 0);
+
+    for i in 1..=5 {
+        w.write_nosync(Box::new(i));
+    }
+    // `other` is pinned to the current value, which is not being retired
+    assert_eq!(*other.read(), 5);
+    let mut vals: Vec<usize> = w.try_sync().iter().map(|b| **b).collect();
+    vals.sort_unstable();
+    assert_eq!(vals, [1, 2, 3, 4]);
+
+    w.write_nosync(Box::new(6));
+    w.write_nosync(Box::new(7));
+    // 5 is held by `other`, 6 by nobody
+    assert_eq!(w.try_sync().iter().map(|b| **b).collect::<Vec<_>>(), [6]);
+    assert!(w.try_sync().is_empty());
+
+    assert_eq!(*other.read(), 7);
+    assert_eq!(w.try_sync().iter().map(|b| **b).collect::<Vec<_>>(), [5]);
+    pinned.release();
+    assert_eq!(w.try_sync().iter().map(|b| **b).collect::<Vec<_>>(), [0]);
+    assert!(!w.has_old_values());
+}
+
+/// A plain reader's guard still holds back everything published while it is alive.
+#[test]
+fn read_guard_holds_back_everything() {
+    let (mut w, mut r) = slot(0usize);
+    let g = r.read();
     let mut returned = 0;
     for i in 1..=10 {
         returned += w.write(Box::new(i)).len();
     }
-    returned += w.try_sync().len();
-    assert_eq!(returned, 0);
-
-    // reading again moves the reader to the latest value and lets go of the rest
-    assert_eq!(*r.read(), 10);
-    let back = w.try_sync();
-    assert_eq!(back.len(), 10);
-    let mut vals: Vec<usize> = back.iter().map(|b| **b).collect();
-    vals.sort_unstable();
-    assert_eq!(vals, (0..10).collect::<Vec<_>>());
-    assert!(!w.has_old_values());
+    assert_eq!(returned + w.try_sync().len(), 0);
+    assert_eq!(*g, 0);
+    drop(g);
+    assert_eq!(w.try_sync().len(), 10);
 }
 
 #[test]

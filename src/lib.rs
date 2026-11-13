@@ -77,13 +77,35 @@ impl<V> Deref for CachePadded<V> {
     }
 }
 
-/// A reader's epoch, shared between the [`Reader`] and the writer's slab of epochs.
+/// What a reader tells the writer about itself.
+struct ReaderState {
+    /// The reader's epoch: counts its read sections, with `READER_FLAG` set while it is in
+    /// one, or `DEAD`.
+    epoch: atomic::AtomicUsize,
+
+    /// The one value the reader's current read section holds, if the reader has said so.
+    ///
+    /// A reader in a read section may normally be using *any* value that was the latest at
+    /// some point since it entered: the writer cannot tell which one its load returned, or
+    /// whether it has loaded at all yet. So the writer keeps all of them. A reader that is
+    /// going to stay in its section (a [`cached::CachedReader`]) stores the pointer it loaded
+    /// here, and from then on the writer only keeps that value for it.
+    ///
+    /// Rules for the reader: non-null only while in a read section, only ever the pointer
+    /// loaded in that section, and cleared before the section is left. See
+    /// `Writer::track_retired()` for why the writer can rely on it.
+    ///
+    /// (`()` rather than `T`: the writer only compares it.)
+    held: atomic::AtomicPtr<()>,
+}
+
+/// A reader's [`ReaderState`], shared between the [`Reader`] and the writer's slab of epochs.
 ///
 /// On a cache line of its own: the reader stores to it twice per read section. If it shared a
 /// line with another reader's epoch (they are small allocations made one after the other, so
 /// an allocator readily places them side by side), those readers would slow each other down
 /// on every read without ever touching the same data.
-type Epoch = Arc<CachePadded<atomic::AtomicUsize>>;
+type Epoch = Arc<CachePadded<ReaderState>>;
 
 /// Epoch value stored by a reader that has been dropped.
 ///
@@ -148,6 +170,10 @@ struct WriterState<T> {
 
     /// Pool of empty value vecs, to avoid allocating one per scan.
     val_pool: Vec<Vec<*mut T>>,
+
+    /// Scratch space for `Writer::track_retired()`, empty between calls: readers found in a
+    /// read section that have said which value they hold (slab index, epoch, value).
+    holders: Vec<(usize, usize, *mut T)>,
 
     /// Set when a `DEAD` epoch has been observed and the epoch slab needs a sweep to recycle
     /// dropped readers.
@@ -245,6 +271,7 @@ impl<T> Writer<T> {
                 unscanned: Vec::new(),
                 prevs: Vec::new(),
                 val_pool: Vec::new(),
+                holders: Vec::new(),
                 pool: Vec::new(),
                 saw_dead: false,
             }),
@@ -347,7 +374,7 @@ impl<T> Writer<T> {
                 // loom's interleaving model, so loom can't catch this).
                 epochs
                     .get(*idx)
-                    .is_some_and(|e| e.load(atomic::Ordering::Acquire) == *prev)
+                    .is_some_and(|e| e.epoch.load(atomic::Ordering::Acquire) == *prev)
             });
 
             if tracked.is_empty() {
@@ -404,7 +431,7 @@ impl<T> Writer<T> {
         for (idx, e) in epochs.iter() {
             // Acquire pairs with the `Release` store in `Reader::drop`: the reader's last access
             // to the epoch (and its `Arc`) happens-before we drop the `Arc` in the slab.
-            if e.load(atomic::Ordering::Acquire) == DEAD {
+            if e.epoch.load(atomic::Ordering::Acquire) == DEAD {
                 if referenced.binary_search(&idx).is_ok() {
                     // A `prevs` entry still refers to this slot. Sweep again next time, so the
                     // slot is reclaimed once that entry is collected, even if `try_sync()` is
@@ -525,28 +552,85 @@ impl<T> Writer<T> {
 
         // collect the readers that may still be reading the retired values, so we can free them
         // later.
+        //
+        // `remaining_readers`: in a read section, and may be using any of the values.
+        // `holders`: in a read section, and have said which single value they hold.
         let mut remaining_readers = state.pool.pop().unwrap_or_default();
+        let mut holders = std::mem::take(&mut state.holders);
 
-        for (idx, epoch) in epochs.iter() {
+        for (idx, reader) in epochs.iter() {
             // This must be `Acquire`, not `Relaxed`. A reader we do *not* track here (idle, or
             // dead) can have the values freed straight away, so its earlier accesses to them
             // must happen-before that free. The acquire provides this by pairing with the
             // `Release` epoch stores in `ReadGuard::drop`, `Reader::read()` (entry) and
             // `Reader::drop`. The fence above makes sure a reader that might still load one of
             // the values shows up here as in-section and gets tracked (see "In flight").
-            let v = epoch.load(atomic::Ordering::Acquire);
+            let v = reader.epoch.load(atomic::Ordering::Acquire);
             if v == DEAD {
                 state.saw_dead = true;
             } else if v & READER_FLAG != 0 {
-                remaining_readers.push((idx, v));
+                // The reader is (or just was) in the read section with epoch `v`. Has it said
+                // which value that section holds?
+                //
+                // Whatever this load returns was stored during section `v` or a later one,
+                // never an earlier one: the reader clears `held` before it leaves a section,
+                // which is before the store of `v` that our `Acquire` load of the epoch
+                // synchronized with. So:
+                //
+                // - null: section `v` has not said (or the reader has since left it, or is
+                //   between sections). Assume it may hold anything, as for a plain reader.
+                // - `p`, stored in section `v`: that section holds `p` and, by the rules on
+                //   `ReaderState::held`, never anything else. It needs none of the other values.
+                // - `p`, stored in a later section: section `v` is over, so it needs nothing.
+                //   The later section started after our fence (we saw the reader in `v` after
+                //   it), so it is in the "Re-entry" case and cannot have loaded a value retired
+                //   before the fence: `p` is none of those, and the reader is not tracked.
+                //
+                // In the last two cases, tracking the reader for `p` alone (with epoch `v`) is
+                // exactly right, or (third case) more than is needed.
+                let held = reader.held.load(atomic::Ordering::Acquire);
+                if held.is_null() {
+                    remaining_readers.push((idx, v));
+                } else {
+                    holders.push((idx, v, held.cast::<T>()));
+                }
             }
         }
 
-        if remaining_readers.is_empty() {
-            // SAFETY: no reader was in a read section after the fence, so (see "In flight"
-            // above) no section that could have loaded these values is still running, and
-            // (see "Re-entry") none can load them from now on. The `Acquire` loads above order
-            // the readers' earlier accesses before this point.
+        // A holder only matters for the value it holds, and only if that value is one of those
+        // retired here. Each such value gets a batch of its own, waiting for its holders and
+        // for the readers that may hold anything.
+        while let Some((_, _, held)) = holders.last().copied() {
+            let Some(at) = state.unscanned.iter().position(|val| *val == held) else {
+                // holds something that is not being retired (usually: the current value)
+                holders.pop();
+                continue;
+            };
+            let mut vals = state.val_pool.pop().unwrap_or_default();
+            vals.push(state.unscanned.swap_remove(at));
+            let mut tracked = state.pool.pop().unwrap_or_default();
+            tracked.extend_from_slice(&remaining_readers);
+            holders.retain(|(idx, v, h)| {
+                if *h == held {
+                    tracked.push((*idx, *v));
+                }
+                *h != held
+            });
+            state.prevs.push(Retired { vals, tracked });
+        }
+        state.holders = holders;
+
+        if state.unscanned.is_empty() {
+            // every value went into a batch of its own above
+            remaining_readers.clear();
+            state.pool.push(remaining_readers);
+        } else if remaining_readers.is_empty() {
+            // SAFETY: after the fence, no reader was in a read section that could be using
+            // these values: the only readers in a section had said which value they hold, and
+            // it is none of these. So (see "In flight" above) no section that could have
+            // loaded these values is still running, and (see "Re-entry") none can load them
+            // from now on. The `Acquire` loads above order the readers' earlier accesses before
+            // this point.
             out.extend(
                 state
                     .unscanned
@@ -586,7 +670,10 @@ impl<T> Clone for Reader<T> {
 
 impl<T> Reader<T> {
     fn new(shared: Arc<Shared<T>>) -> Reader<T> {
-        let epoch = Arc::new(CachePadded(atomic::AtomicUsize::new(0)));
+        let epoch = Arc::new(CachePadded(ReaderState {
+            epoch: atomic::AtomicUsize::new(0),
+            held: atomic::AtomicPtr::new(std::ptr::null_mut()),
+        }));
         // note: the slab entry is not tied to this Reader's lifetime; it is removed by the writer
         // after we mark ourselves DEAD and no prevs entry refers to us.
         shared.epochs.lock().unwrap().insert(epoch.clone());
@@ -631,7 +718,7 @@ impl<T> Reader<T> {
         //
         // Note: we split this `add` up because we don't need the consistency `add` provides (we're
         // the only writer).
-        let v = self.epoch.load(atomic::Ordering::Relaxed);
+        let v = self.epoch.epoch.load(atomic::Ordering::Relaxed);
         assert!(v & READER_FLAG == 0);
 
         // NOTE: if a `ReadGuard` is leaked (eg `mem::forget`), the flag stays set and the
@@ -644,7 +731,9 @@ impl<T> Reader<T> {
         // plain store from the same thread does not extend a release sequence, so a writer
         // that reads this value would not synchronize with that earlier store. (Accesses in
         // *this* section are covered by the store in `ReadGuard::drop`.)
-        self.epoch.store(v | READER_FLAG, atomic::Ordering::Release);
+        self.epoch
+            .epoch
+            .store(v | READER_FLAG, atomic::Ordering::Release);
 
         // Ensure the `epoch` store is visible in other threads before we read
         // `active` (so we don't free-and-reuse a value we're about to dereference).
@@ -673,13 +762,35 @@ impl<T> Reader<T> {
         self.shared.active.load(atomic::Ordering::Acquire)
     }
 
+    /// Tell the writer that the read section we are in holds `val` and nothing else, so that it
+    /// stops keeping every other value for us. See [`ReaderState::held`].
+    ///
+    /// `val` must be the pointer [`Reader::enter()`] returned for the current read section, and
+    /// the caller must not use any other value until it has called [`Reader::leave()`].
+    fn hold_only(&self, val: *const T) {
+        // `Release` pairs with the writer's `Acquire` load in `Writer::track_retired()`: a
+        // writer that sees this pointer also sees that it was stored in this section.
+        self.epoch
+            .held
+            .store(val.cast_mut().cast(), atomic::Ordering::Release);
+    }
+
     /// Leave the read section started by [`Reader::enter()`]. The pointer it returned must not
     /// be used afterwards.
     fn leave(&self) {
+        // Before the epoch moves on: a writer that sees a later epoch must not find what an
+        // earlier section held (see `Writer::track_retired()`). A plain load first, because a
+        // plain reader never holds, and then there is nothing to store.
+        if !self.epoch.held.load(atomic::Ordering::Relaxed).is_null() {
+            self.epoch
+                .held
+                .store(std::ptr::null_mut(), atomic::Ordering::Release);
+        }
+
         // NOTE: this split operation is ok because we are the only writer (others read this value).
         // This is split into 2 operations so that better code can be generated (ie: omitting CAS
         // on archs without atomic add opcodes).
-        let v = self.epoch.load(atomic::Ordering::Relaxed);
+        let v = self.epoch.epoch.load(atomic::Ordering::Relaxed);
         assert!(v & READER_FLAG != 0);
         // `Release` pairs with the writer's `Acquire` epoch loads in `Writer::collect_prevs()`
         // and `Writer::track_retired()`, so this section's reads of the value happen-before any
@@ -691,6 +802,7 @@ impl<T> Reader<T> {
         // keeps the tracked value alive until the epoch changes again, and the odd `DEAD`
         // value is still never reached.
         self.epoch
+            .epoch
             .store(v.wrapping_add(READER_FLAG), atomic::Ordering::Release);
         // NOTE: adding a fence(SeqCst) here speeds up loom significantly,
         // implying not having it opens up many more execution variants. This
@@ -711,7 +823,7 @@ impl<T> Drop for Reader<T> {
         //
         // Note: we don't need the lock for this: a dead-marked epoch is simply never tracked
         // again, and the slab entry keeps the epoch alive until the writer recycles it.
-        self.epoch.store(DEAD, atomic::Ordering::Release);
+        self.epoch.epoch.store(DEAD, atomic::Ordering::Release);
     }
 }
 

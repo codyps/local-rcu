@@ -43,9 +43,10 @@ Wrap the reader in a [`local_rcu::cached::CachedReader`](https://docs.rs/local-r
 It stays in its read section between reads, so reading a value that has not
 changed costs one load and one comparison, with no store and no fence.
 
-The price: between reads it holds back the value it last saw and every value
-published since. A reader that goes idle should call `CachedReader::release()`
-first (a plain `Reader` never holds anything back while idle).
+The price: between reads it holds back the value it last saw (that one value
+only, like the `Arc` those caches keep). A reader that goes idle can call
+`CachedReader::release()` first to let go of it too (a plain `Reader` never
+holds anything back while idle).
 
 ## High Level Internal flow
 
@@ -76,6 +77,11 @@ replaced since the last snapshot. They are tracked together as one batch. This m
 `write_nosync()` about as cheap as a pointer store, and leaves the readers' epochs alone
 between snapshots. In return, a reader that is in a read section during the snapshot holds back
 the whole batch, including values that were replaced while nobody was reading.
+
+A reader that will stay in its read section (a `CachedReader`) additionally stores the pointer
+it loaded next to its epoch, and clears it before leaving the section. When the snapshot finds
+such a reader, it is tracked only for that one value instead of for everything retired while
+it stays there.
 
 Each time the `Writer` is updated with `Writer::write` (or via explicit request like
 `Writer::try_sync()` or `Writer::sync()`), the `Writer` re-examines these previous values: a

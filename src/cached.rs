@@ -1,5 +1,5 @@
 //! An opt-in reader that makes repeated reads of an unchanged value nearly free, at the price
-//! of holding old values back while it is idle.
+//! of holding on to the value it last read while it is idle.
 //!
 //! A plain [`Reader`] tells the writer about every read: it enters a read section (a store and
 //! a `SeqCst` fence), loads the value, and leaves the section when the guard is dropped. A
@@ -32,16 +32,17 @@
 //!
 //! # The trade-off
 //!
-//! Staying in a read section is exactly what a long-lived [`ReadGuard`](crate::ReadGuard)
-//! does, with the same cost: **between two calls to [`CachedReader::read()`], the writer cannot
-//! get back the value this reader last saw, nor any value published since.** A `CachedReader`
-//! that reads often is harmless. One that stops reading holds on to an ever-growing list of old
-//! values until it reads again, is [released](CachedReader::release) or is dropped. A plain,
-//! idle [`Reader`] never holds anything back.
+//! **Between two calls to [`CachedReader::read()`], the writer cannot get back the value this
+//! reader last saw.** That is one value per reader, however long the reader stays idle and
+//! however many values are published meanwhile: the reader tells the writer which value it
+//! holds, and the writer keeps only that one for it. (A long-lived
+//! [`ReadGuard`](crate::ReadGuard) is different: it holds back the value it guards and every
+//! value published since.) A plain, idle [`Reader`] never holds anything back.
 //!
 //! So:
 //!
-//! - Call [`CachedReader::release()`] before going idle for a long time (or drop the reader).
+//! - Call [`CachedReader::release()`] before going idle for a long time (or drop the reader)
+//!   if even that one value must come back to the writer.
 //! - Prefer the plain [`Reader`] when old values must come back to the writer promptly, or
 //!   when reads are rare compared to writes: after every write the next read pays the full
 //!   price of leaving and re-entering a section.
@@ -51,7 +52,8 @@
 //! The reader is in one of two states:
 //!
 //! - *Released*: not in a read section, nothing cached. `read()` enters a section exactly like
-//!   [`Reader::read()`] and caches the pointer it loaded.
+//!   [`Reader::read()`], caches the pointer it loaded, and tells the writer that this pointer
+//!   is the only value the section will use.
 //! - *Pinned*: in a read section, with the pointer loaded in that section cached. `read()`
 //!   loads the shared pointer and compares it with the cached one. If they are equal the
 //!   cached value is returned. Otherwise the reader leaves its section (which lets the writer
@@ -108,8 +110,8 @@ impl<T> CachedReader<T> {
     /// The reference borrows the reader, so it has to be given up before the next `read()`.
     /// It stays valid for as long as it is held, like a [`ReadGuard`](crate::ReadGuard) does.
     ///
-    /// After this returns, the reader holds back the returned value and everything published
-    /// later, until the next `read()`, a [`release()`](CachedReader::release), or its drop.
+    /// After this returns, the reader holds back the returned value (and only that one), until
+    /// the next `read()`, a [`release()`](CachedReader::release), or its drop.
     #[inline]
     pub fn read(&mut self) -> &T {
         if !self.cached.is_null() {
@@ -137,12 +139,16 @@ impl<T> CachedReader<T> {
         }
 
         self.cached = self.reader.enter();
+        // We never use anything but `cached` in this section (see the module docs: a new value
+        // means leaving the section first), so the writer need not keep every later value for
+        // us, as it must for a section that might still be about to load.
+        self.reader.hold_only(self.cached);
         // SAFETY: `enter()` returns a pointer that stays valid until `leave()`, which only
         // `release()` calls, and that needs `&mut self`.
         unsafe { &*self.cached }
     }
 
-    /// Leave the read section, letting the writer collect every value this reader was holding
+    /// Leave the read section, letting the writer collect the value this reader was holding
     /// back. The next [`read()`](CachedReader::read) enters a new section.
     ///
     /// Call this before the reader goes idle for a long time. Does nothing if the reader is
@@ -155,7 +161,7 @@ impl<T> CachedReader<T> {
         }
     }
 
-    /// Is this reader currently in a read section, holding old values back?
+    /// Is this reader currently in a read section, holding back the value it last read?
     pub fn is_pinned(&self) -> bool {
         !self.cached.is_null()
     }
