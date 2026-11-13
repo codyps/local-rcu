@@ -48,6 +48,16 @@ only, like the `Arc` those caches keep). A reader that goes idle can call
 `CachedReader::release()` first to let go of it too (a plain `Reader` never
 holds anything back while idle).
 
+## Why should I pick this library?
+
+- `local-rcu` has performance that is very good compared to other rcu-like cell libraries for Rust. See benchmarks of `local-rcu` against alternatives in [`rcu-bench`](https://codyps.github.io/rcu-bench).
+- `local-rcu` doesn't require writing any unsafe code to use the library.
+- `local-rcu` doesn't have a Copy or Clone requirement.
+- `local-rcu` doesn't rely on any arch/os specific code not abstracted by `std` and `core`.
+- `local-rcu` allows recycling values, not just dropping them.
+
+See comparisons of `local-rcu` against alternatives in [`COMPARISONS.md`](COMPARISONS.md).
+
 ## High Level Internal flow
 
 A `slot` is the shared data structure represented by a single `Writer` and one or more `Readers`. 
@@ -119,8 +129,5 @@ To avoid synchronization, we bias towards keeping values alive longer (which is 
   as still reading and keeps the old value a little longer, until the epoch moves on.
 
 
-## Alternatives
 
-Comparisons of `local-rcu` against alternative and other rust "rcu" crates can
-be found in [`COMPARISONS.md`](COMPARISONS.md).
 
