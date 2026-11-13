@@ -126,8 +126,8 @@ pub struct Writer<T> {
 unsafe impl<T: Send + Sync> Send for Writer<T> {}
 unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 
-/// Readers (as indices into `Shared::epochs`) that may still be able to reach the values of a
-/// [`Retired`] batch, each with a snapshot of its epoch at the time the batch was scanned.
+/// A reader (as an index into `Shared::epochs`) that may still be able to reach the values of a
+/// [`Retired`] batch, with a snapshot of its epoch at the time the batch was scanned.
 ///
 /// We track readers by slab index instead of cloning an `Arc` per tracked reader per scan:
 /// - `Arc::clone`/`drop` are atomic RMWs on a cacheline the reader is actively writing (the epoch
@@ -135,7 +135,100 @@ unsafe impl<T: Send + Sync> Sync for Writer<T> {}
 ///   and readers. Tracking by index keeps the reader's cacheline RMW-free for the writer's entire
 ///   lifetime of the slot.
 /// - It also avoids a per-write allocation when readers are busy reading.
-type TrackedReaders = Vec<(usize, usize)>;
+type TrackedReader = (usize, usize);
+
+/// The readers tracked for one [`Retired`] batch.
+///
+/// Usually a scan catches very few readers in a read section, and they are kept right here.
+/// A `Vec` each meant an allocation for every value a reader held back. More than
+/// [`TrackedReaders::INLINE`] readers do get a `Vec`: the one the scan filled, as it is.
+enum TrackedReaders {
+    /// The first `len` of `readers`.
+    Few {
+        len: u8,
+        readers: [TrackedReader; TrackedReaders::INLINE],
+    },
+    Many(Vec<TrackedReader>),
+}
+
+impl TrackedReaders {
+    const INLINE: usize = 2;
+
+    /// The readers in `found`. A short list is copied and `found` goes back to `pool`
+    /// (emptied, for the next scan); a long one is kept as it is.
+    fn new(mut found: Vec<TrackedReader>, pool: &mut Vec<Vec<TrackedReader>>) -> Self {
+        if found.len() > Self::INLINE {
+            return TrackedReaders::Many(found);
+        }
+        let mut readers = [(0, 0); Self::INLINE];
+        readers[..found.len()].copy_from_slice(&found);
+        let len = found.len() as u8;
+        found.clear();
+        pool.push(found);
+        TrackedReaders::Few { len, readers }
+    }
+
+    fn as_slice(&self) -> &[TrackedReader] {
+        match self {
+            TrackedReaders::Few { len, readers } => &readers[..usize::from(*len)],
+            TrackedReaders::Many(readers) => readers,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+
+    /// Keep the readers for which `keep` returns true.
+    #[inline]
+    fn retain(&mut self, mut keep: impl FnMut(&TrackedReader) -> bool) {
+        match self {
+            TrackedReaders::Few { len, readers } => {
+                // The usual answer is "all of them": a batch that waits for a long time is
+                // looked at again and again. Find that out with a plain read-only pass. (If a
+                // reader does have to go, `keep` is asked about the ones before it a second
+                // time below; it may answer differently, and either answer is fine then.)
+                let n = usize::from(*len);
+                if readers[..n].iter().all(&mut keep) {
+                    return;
+                }
+                let mut kept = 0;
+                for at in 0..n {
+                    if keep(&readers[at]) {
+                        readers[kept] = readers[at];
+                        kept += 1;
+                    }
+                }
+                *len = kept as u8;
+            }
+            TrackedReaders::Many(readers) => readers.retain(|reader| keep(reader)),
+        }
+    }
+
+    /// Done with the list: its `Vec`, if it has one, goes back to `pool`.
+    fn recycle(self, pool: &mut Vec<Vec<TrackedReader>>) {
+        if let TrackedReaders::Many(mut readers) = self {
+            readers.clear();
+            pool.push(readers);
+        }
+    }
+}
+
+/// The values of one [`Retired`] batch. A single one, which is all `Writer::write()` ever
+/// retires at a time, needs no allocation.
+enum RetiredVals<T> {
+    One(*mut T),
+    Many(Vec<*mut T>),
+}
+
+impl<T> RetiredVals<T> {
+    fn as_slice(&self) -> &[*mut T] {
+        match self {
+            RetiredVals::One(val) => std::slice::from_ref(val),
+            RetiredVals::Many(vals) => vals,
+        }
+    }
+}
 
 /// Retired values that one scan of the reader epochs covers, with the readers that scan found
 /// in a read section. See `Writer::track_retired()`.
@@ -151,7 +244,7 @@ type TrackedReaders = Vec<(usize, usize)>;
 /// detected by miri). `Writer::collect_prevs()` re-forms the `Box`es only once all tracked
 /// readers have been observed to leave the read section they were tracked in.
 struct Retired<T> {
-    vals: Vec<*mut T>,
+    vals: RetiredVals<T>,
     tracked: TrackedReaders,
 }
 
@@ -165,10 +258,11 @@ struct WriterState<T> {
     /// Batches of replaced values waiting for the readers tracked with them to move on.
     prevs: Vec<Retired<T>>,
 
-    /// Pool of empty tracking vecs, to avoid allocating one per scan.
-    pool: Vec<TrackedReaders>,
+    /// Pool of empty tracking vecs: each scan fills one, and a batch that tracks many readers
+    /// keeps it until it is collected.
+    pool: Vec<Vec<TrackedReader>>,
 
-    /// Pool of empty value vecs, to avoid allocating one per scan.
+    /// Pool of empty value vecs, for the batches of more than one value.
     val_pool: Vec<Vec<*mut T>>,
 
     /// Scratch space for `Writer::track_retired()`, empty between calls: readers found in a
@@ -190,7 +284,7 @@ impl<T> Drop for WriterState<T> {
         // `ReadGuard` borrows its `Reader`, so no guard (and no `&T` into these values) can
         // exist by then, and the `Release`/`Acquire` ordering on the final `Arc` decrements
         // makes the readers' last accesses happen-before this drop.
-        let batched = self.prevs.iter().flat_map(|batch| batch.vals.iter());
+        let batched = self.prevs.iter().flat_map(|batch| batch.vals.as_slice());
         for val in self.unscanned.iter().chain(batched) {
             drop(unsafe { Box::from_raw(*val) });
         }
@@ -307,9 +401,40 @@ impl<T> Writer<T> {
     /// You may get none of the old values back as readers may still exist. The next time you write
     /// (or call `try_sync()`), additional previous values are returned. Old values may be returned
     /// in any order.
+    ///
+    /// Whenever there is something to return, this allocates the `Vec` it comes in.
+    /// [`Writer::write_into()`] does not.
     pub fn write(&mut self, val: Box<T>) -> Vec<Box<T>> {
         let mut r = Vec::new();
+        self.write_into(val, &mut r);
+        r
+    }
 
+    /// Write a new value, appending any old values that are no longer in use to `old`
+    ///
+    /// The same as [`Writer::write()`], except for where the old values go. A writer that
+    /// keeps one `Vec` for them, and empties it between writes, writes without allocating
+    /// anything but the values themselves. It can go further and reuse the `Box`es it gets
+    /// back for the values it writes next:
+    ///
+    /// ```
+    /// let (mut w, mut r) = local_rcu::slot(0u64);
+    /// let mut old: Vec<Box<u64>> = Vec::new();
+    ///
+    /// for i in 1..=100 {
+    ///     // an old value's allocation if there is one, a new one otherwise
+    ///     let val = match old.pop() {
+    ///         Some(mut b) => {
+    ///             *b = i;
+    ///             b
+    ///         }
+    ///         None => Box::new(i),
+    ///     };
+    ///     w.write_into(val, &mut old);
+    ///     assert_eq!(*r.read(), i);
+    /// }
+    /// ```
+    pub fn write_into(&mut self, val: Box<T>, old: &mut Vec<Box<T>>) {
         // Aquire the lock once for the whole operation. Scanning for old values, publishing, and
         // scanning for readers of the value we're replacing.
         let mut epochs = self.shared.epochs.lock().unwrap();
@@ -317,12 +442,10 @@ impl<T> Writer<T> {
         // Old values first, then the scan for the new one: the readers tracked for the value
         // we are about to replace have only just been looked at, there is no point in reading
         // their epochs a second time straight away.
-        self.collect_prevs(&epochs.slab, &mut r);
+        self.collect_prevs(&epochs.slab, old);
         self.publish(val);
-        self.track_retired(&epochs, &mut r);
+        self.track_retired(&epochs, old);
         Self::sweep_dead(self.state_mut(), &mut epochs.slab);
-
-        r
     }
 
     /// Read the current value in this writer.
@@ -361,13 +484,19 @@ impl<T> Writer<T> {
     /// for some special purpose.
     pub fn try_sync(&mut self) -> Vec<Box<T>> {
         let mut v = Vec::new();
-
-        let mut epochs = self.shared.epochs.lock().unwrap();
-        self.collect_prevs(&epochs.slab, &mut v);
-        self.track_retired(&epochs, &mut v);
-        Self::sweep_dead(self.state_mut(), &mut epochs.slab);
-
+        self.try_sync_into(&mut v);
         v
+    }
+
+    /// Check if we can release previous values, appending those we can to `old`
+    ///
+    /// The same as [`Writer::try_sync()`], except for where the old values go: see
+    /// [`Writer::write_into()`].
+    pub fn try_sync_into(&mut self, old: &mut Vec<Box<T>>) {
+        let mut epochs = self.shared.epochs.lock().unwrap();
+        self.collect_prevs(&epochs.slab, old);
+        self.track_retired(&epochs, old);
+        Self::sweep_dead(self.state_mut(), &mut epochs.slab);
     }
 
     /// Scan `prevs` for batches whose readers have all moved on, collect their values into `out`.
@@ -395,10 +524,7 @@ impl<T> Writer<T> {
             });
 
             if tracked.is_empty() {
-                let Retired {
-                    mut vals,
-                    mut tracked,
-                } = state.prevs.remove(i);
+                let Retired { vals, tracked } = state.prevs.remove(i);
                 // SAFETY: every reader that could have been dereferencing one of `vals` was
                 // tracked by `track_retired()`, and `tracked` being empty means each has been
                 // observed to leave the read section it was tracked in: the `Acquire` load in
@@ -411,11 +537,15 @@ impl<T> Writer<T> {
                 // Re-forming (and later dropping) the `Box`es here is therefore race-free;
                 // doing it any earlier (eg at retire time in `publish()`) would be UB (see
                 // `Retired`).
-                out.extend(vals.drain(..).map(|val| unsafe { Box::from_raw(val) }));
-                // recycle the allocations
-                tracked.clear();
-                state.pool.push(tracked);
-                state.val_pool.push(vals);
+                match vals {
+                    RetiredVals::One(val) => out.push(unsafe { Box::from_raw(val) }),
+                    RetiredVals::Many(mut vals) => {
+                        out.extend(vals.drain(..).map(|val| unsafe { Box::from_raw(val) }));
+                        state.val_pool.push(vals);
+                    }
+                }
+                // recycle the allocation, if the batch had one
+                tracked.recycle(&mut state.pool);
             } else {
                 i += 1;
             }
@@ -437,7 +567,7 @@ impl<T> Writer<T> {
             let mut r: Vec<usize> = state
                 .prevs
                 .iter()
-                .flat_map(|batch| batch.tracked.iter().map(|(i, _)| *i))
+                .flat_map(|batch| batch.tracked.as_slice().iter().map(|(i, _)| *i))
                 .collect();
             r.sort_unstable();
             r.dedup();
@@ -536,7 +666,7 @@ impl<T> Writer<T> {
     fn track_holders(
         state: &mut WriterState<T>,
         readers: &Readers,
-        remaining_readers: &mut TrackedReaders,
+        remaining_readers: &mut Vec<TrackedReader>,
     ) {
         // in a read section, and have said which single value they hold
         let mut holders = std::mem::take(&mut state.holders);
@@ -584,8 +714,7 @@ impl<T> Writer<T> {
                 holders.pop();
                 continue;
             };
-            let mut vals = state.val_pool.pop().unwrap_or_default();
-            vals.push(state.unscanned.swap_remove(at));
+            let vals = RetiredVals::One(state.unscanned.swap_remove(at));
             let mut tracked = state.pool.pop().unwrap_or_default();
             tracked.extend_from_slice(remaining_readers);
             holders.retain(|(idx, v, h)| {
@@ -594,6 +723,7 @@ impl<T> Writer<T> {
                 }
                 *h != held
             });
+            let tracked = TrackedReaders::new(tracked, &mut state.pool);
             state.prevs.push(Retired { vals, tracked });
         }
         // hand the (empty) scratch space back
@@ -687,12 +817,15 @@ impl<T> Writer<T> {
             );
             state.pool.push(remaining_readers);
         } else {
-            let empty = state.val_pool.pop().unwrap_or_default();
-            let vals = std::mem::replace(&mut state.unscanned, empty);
-            state.prevs.push(Retired {
-                vals,
-                tracked: remaining_readers,
-            });
+            let vals = if state.unscanned.len() == 1 {
+                // the usual case, `write()`: no `Vec` for it, and `unscanned` keeps its own
+                RetiredVals::One(state.unscanned.pop().expect("one value"))
+            } else {
+                let empty = state.val_pool.pop().unwrap_or_default();
+                RetiredVals::Many(std::mem::replace(&mut state.unscanned, empty))
+            };
+            let tracked = TrackedReaders::new(remaining_readers, &mut state.pool);
+            state.prevs.push(Retired { vals, tracked });
         }
     }
 }
@@ -1221,5 +1354,54 @@ pub mod closing {
         pub fn is_closed(&self) -> bool {
             self.state.is_closed()
         }
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod tracked_readers_tests {
+    use super::TrackedReaders;
+
+    #[test]
+    fn few_readers_are_kept_inline() {
+        let mut pool = Vec::new();
+        let mut found = Vec::with_capacity(8);
+        found.extend([(1, 10), (2, 20)]);
+        let mut t = TrackedReaders::new(found, &mut pool);
+        assert!(matches!(t, TrackedReaders::Few { .. }));
+        assert_eq!(t.as_slice(), [(1, 10), (2, 20)]);
+        // the scan's vec is free for the next scan, with its capacity
+        assert_eq!(pool.len(), 1);
+        assert!(pool[0].is_empty() && pool[0].capacity() == 8);
+
+        t.retain(|(idx, _)| *idx != 1);
+        assert_eq!(t.as_slice(), [(2, 20)]);
+        t.retain(|_| false);
+        assert!(t.is_empty());
+        t.recycle(&mut pool);
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn many_readers_keep_the_vec() {
+        let mut pool = Vec::new();
+        let found = vec![(1, 10), (2, 20), (3, 30)];
+        let mut t = TrackedReaders::new(found, &mut pool);
+        assert!(matches!(t, TrackedReaders::Many(_)));
+        assert!(pool.is_empty());
+
+        t.retain(|(idx, _)| *idx == 3);
+        assert_eq!(t.as_slice(), [(3, 30)]);
+        t.retain(|_| false);
+        assert!(t.is_empty());
+        t.recycle(&mut pool);
+        assert_eq!(pool.len(), 1);
+        assert!(pool[0].is_empty() && pool[0].capacity() >= 3);
+    }
+
+    #[test]
+    fn no_readers() {
+        let mut pool = Vec::new();
+        let t = TrackedReaders::new(Vec::new(), &mut pool);
+        assert!(t.is_empty());
     }
 }
