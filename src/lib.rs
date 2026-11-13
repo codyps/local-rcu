@@ -403,10 +403,10 @@ impl<T> Writer<T> {
     /// in any order.
     ///
     /// Whenever there is something to return, this allocates the `Vec` it comes in.
-    /// [`Writer::write_into()`] does not.
+    /// [`Writer::write_sync_into()`] does not.
     pub fn write(&mut self, val: Box<T>) -> Vec<Box<T>> {
         let mut r = Vec::new();
-        self.write_into(val, &mut r);
+        self.write_sync_into(val, &mut r);
         r
     }
 
@@ -430,11 +430,11 @@ impl<T> Writer<T> {
     ///         }
     ///         None => Box::new(i),
     ///     };
-    ///     w.write_into(val, &mut old);
+    ///     w.write_sync_into(val, &mut old);
     ///     assert_eq!(*r.read(), i);
     /// }
     /// ```
-    pub fn write_into(&mut self, val: Box<T>, old: &mut Vec<Box<T>>) {
+    pub fn write_sync_into(&mut self, val: Box<T>, old: &mut Vec<Box<T>>) {
         // Aquire the lock once for the whole operation. Scanning for old values, publishing, and
         // scanning for readers of the value we're replacing.
         let mut epochs = self.shared.epochs.lock().unwrap();
@@ -491,7 +491,7 @@ impl<T> Writer<T> {
     /// Check if we can release previous values, appending those we can to `old`
     ///
     /// The same as [`Writer::try_sync()`], except for where the old values go: see
-    /// [`Writer::write_into()`].
+    /// [`Writer::write_sync_into()`].
     pub fn try_sync_into(&mut self, old: &mut Vec<Box<T>>) {
         let mut epochs = self.shared.epochs.lock().unwrap();
         self.collect_prevs(&epochs.slab, old);

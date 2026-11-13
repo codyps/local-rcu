@@ -77,18 +77,18 @@ fn write_nosync_batches() {
     assert_eq!(counts(&vals), [1, 1, 1, 1, 1]);
 }
 
-/// `write_into()` and `try_sync_into()` append to a `Vec` the caller keeps.
+/// `write_sync_into()` and `try_sync_into()` append to a `Vec` the caller keeps.
 #[test]
-fn write_into_appends() {
+fn write_sync_into_appends() {
     let (mut w, mut r) = slot(0u32);
     let mut old = Vec::new();
 
-    w.write_into(Box::new(1), &mut old);
+    w.write_sync_into(Box::new(1), &mut old);
     assert_eq!(old.iter().map(|b| **b).collect::<Vec<_>>(), [0]);
 
     // a guard holds 1 back: nothing is added, and what is there is left alone
     let g = r.read();
-    w.write_into(Box::new(2), &mut old);
+    w.write_sync_into(Box::new(2), &mut old);
     w.try_sync_into(&mut old);
     assert_eq!(old.len(), 1);
     assert_eq!(*g, 1);

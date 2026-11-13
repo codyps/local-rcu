@@ -166,10 +166,10 @@ const SCENARIOS: &[&str] = &[
     "write(), 1 guard held throughout",
     "write(), 1 idle pinned CachedReader",
     "write(), 1 CachedReader reads after each write",
-    "write_into(), no readers",
-    "write_into(), 1 reader reads after each write",
-    "write_into() reusing boxes, no readers",
-    "write_into() reusing boxes, 1 reader reads after each write",
+    "write_sync_into(), no readers",
+    "write_sync_into(), 1 reader reads after each write",
+    "write_sync_into() reusing boxes, no readers",
+    "write_sync_into() reusing boxes, 1 reader reads after each write",
     "write_nosync() + try_sync() every 128, 1 idle reader",
 ];
 
@@ -262,26 +262,26 @@ fn scenario(id: usize, r: &mut Runner) {
             });
         }
         11 => r.run(|i| {
-            w.write_into(Box::new(val(i)), &mut old);
+            w.write_sync_into(Box::new(val(i)), &mut old);
             old.clear();
         }),
         12 => {
             let mut rd = w.reader();
             r.run(|i| {
-                w.write_into(Box::new(val(i)), &mut old);
+                w.write_sync_into(Box::new(val(i)), &mut old);
                 old.clear();
                 black_box(rd.read()[0]);
             });
         }
         13 => r.run(|i| {
             let v = reuse(&mut old, i);
-            w.write_into(v, &mut old);
+            w.write_sync_into(v, &mut old);
         }),
         14 => {
             let mut rd = w.reader();
             r.run(|i| {
                 let v = reuse(&mut old, i);
-                w.write_into(v, &mut old);
+                w.write_sync_into(v, &mut old);
                 black_box(rd.read()[0]);
             });
         }
@@ -427,7 +427,7 @@ fn held_back(out: &Out) {
     black_box(rd.read()[0]);
     let mut old = Vec::new();
     for i in 0..WRITES {
-        w.write_into(Box::new(val(i)), &mut old);
+        w.write_sync_into(Box::new(val(i)), &mut old);
     }
     // every write replaced one value
     out.row(name, (WRITES - old.len() as u64) as f64, "values");
@@ -527,8 +527,8 @@ impl WriteMode {
     fn name(self) -> &'static str {
         match self {
             WriteMode::Write => "write()",
-            WriteMode::Into => "write_into()",
-            WriteMode::Reuse => "write_into() reusing boxes",
+            WriteMode::Into => "write_sync_into()",
+            WriteMode::Reuse => "write_sync_into() reusing boxes",
             WriteMode::Batched => "write_nosync() + try_sync() every 128",
         }
     }
@@ -584,13 +584,13 @@ fn threaded_pass(job: &Job, measure: Duration) -> (f64, f64) {
                     }),
                     WriteMode::Into => timed(&phase, 32, || {
                         i += 1;
-                        w.write_into(Box::new(val(i)), &mut old);
+                        w.write_sync_into(Box::new(val(i)), &mut old);
                         old.clear();
                     }),
                     WriteMode::Reuse => timed(&phase, 32, || {
                         i += 1;
                         let v = reuse(&mut old, i);
-                        w.write_into(v, &mut old);
+                        w.write_sync_into(v, &mut old);
                     }),
                     WriteMode::Batched => timed(&phase, 32, || {
                         i += 1;
