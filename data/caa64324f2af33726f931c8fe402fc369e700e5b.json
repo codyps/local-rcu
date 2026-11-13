@@ -1,0 +1,77 @@
+{
+ "arch": "aarch64",
+ "commit": "caa64324f2af33726f931c8fe402fc369e700e5b",
+ "date": "2026-11-12T23:30:55-05:00",
+ "hardware": {
+  "cores": "4",
+  "cpu_model": "Neoverse-N2",
+  "uname": "Linux runnervmkb2gk 7.0.0-1017-azure #17~24.04.1-Ubuntu SMP PREEMPT Thu Sep 24 19:06:39 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux"
+ },
+ "results": [
+  {
+   "name": "b/n100_m10",
+   "unit": "ms",
+   "value": 13.515
+  },
+  {
+   "name": "b/n1000_m10",
+   "unit": "ms",
+   "value": 34.367
+  },
+  {
+   "name": "isolated/reader m=1 writer_active=false",
+   "unit": "reads/s/reader",
+   "value": 230410202
+  },
+  {
+   "name": "isolated/reader m=4 writer_active=false",
+   "unit": "reads/s/reader",
+   "value": 229718088
+  },
+  {
+   "name": "isolated/reader m=1 writer_active=true",
+   "unit": "reads/s/reader",
+   "value": 74414185
+  },
+  {
+   "name": "isolated/reader m=4 writer_active=true",
+   "unit": "reads/s/reader",
+   "value": 88529836
+  },
+  {
+   "name": "isolated/writer m=0 readers_idle",
+   "unit": "writes/s",
+   "value": 19572289
+  },
+  {
+   "name": "isolated/writer m=1 readers_idle",
+   "unit": "writes/s",
+   "value": 19882923
+  },
+  {
+   "name": "isolated/writer m=4 readers_idle",
+   "unit": "writes/s",
+   "value": 18267528
+  },
+  {
+   "name": "isolated/writer m=8 readers_idle",
+   "unit": "writes/s",
+   "value": 17089083
+  },
+  {
+   "name": "isolated/writer m=1 readers_busy",
+   "unit": "writes/s",
+   "value": 5910214
+  },
+  {
+   "name": "isolated/writer m=4 readers_busy",
+   "unit": "writes/s",
+   "value": 246642
+  },
+  {
+   "name": "isolated/writer m=8 readers_busy",
+   "unit": "writes/s",
+   "value": 136458
+  }
+ ]
+}
