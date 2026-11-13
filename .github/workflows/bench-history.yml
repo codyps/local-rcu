@@ -159,7 +159,7 @@ jobs:
           git notes add -f -F "$RUNNER_TEMP/note.txt" "$SHA"
           git push origin refs/notes/commits
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@0252fc4ba7626f0298f0cf00902a25c6afc77fa8 # v3.0.0
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           # `with:` inputs are literal: use the expression form, not $RUNNER_TEMP
           path: ${{ runner.temp }}/site
