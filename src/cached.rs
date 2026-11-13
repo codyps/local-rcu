@@ -97,6 +97,9 @@ impl<T> CachedReader<T> {
     /// Turn a reader into a cached reader. It starts out released: nothing is held back until
     /// the first [`read()`](CachedReader::read).
     pub fn new(reader: Reader<T>) -> Self {
+        // From here on the writer looks for values held by readers of this slot. Until the
+        // first `CachedReader` exists it does not, and plain readers cost it nothing extra.
+        reader.count_cached(1);
         CachedReader {
             reader,
             cached: ptr::null(),
@@ -157,6 +160,9 @@ impl<T> CachedReader<T> {
         if !self.cached.is_null() {
             // Clear the cache first so the invariant holds even if `leave()` were to panic.
             self.cached = ptr::null();
+            // Before leaving: the writer must not find this section's value once it sees a
+            // later epoch.
+            self.reader.hold_nothing();
             self.reader.leave();
         }
     }
@@ -167,9 +173,22 @@ impl<T> CachedReader<T> {
     }
 
     /// Turn this back into a plain [`Reader`], releasing it first.
-    pub fn into_inner(mut self) -> Reader<T> {
+    pub fn into_inner(self) -> Reader<T> {
+        // What `drop()` does, then take the plain reader out without running `drop()`.
+        let mut this = std::mem::ManuallyDrop::new(self);
+        this.retire();
+        // SAFETY: `this` is never used again and its `Drop` does not run, so the reader is
+        // moved out exactly once.
+        unsafe { ptr::read(&this.reader) }
+    }
+
+    /// Stop being a cached reader: leave the read section, and tell the writer there is one
+    /// cached reader fewer. Must be the last thing done with `self`.
+    fn retire(&mut self) {
+        // Leave the section properly (rather than letting the inner `Reader` just mark its
+        // epoch dead) so that nothing is held any more when we stop being counted.
         self.release();
-        self.reader
+        self.reader.count_cached(-1);
     }
 }
 
@@ -194,6 +213,8 @@ impl<T> fmt::Debug for CachedReader<T> {
     }
 }
 
-// No `Drop` impl is needed: dropping the inner `Reader` marks its epoch dead, which ends the
-// read section as far as the writer is concerned, and `&mut self` receivers guarantee no
-// reference returned by `read()` is still alive.
+impl<T> Drop for CachedReader<T> {
+    fn drop(&mut self) {
+        self.retire();
+    }
+}

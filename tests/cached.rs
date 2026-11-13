@@ -270,3 +270,40 @@ fn concurrent_readers_never_see_dropped_values() {
     drop(w.sync());
     assert!(!w.has_old_values());
 }
+
+/// The writer only looks for held values while a `CachedReader` exists. Creating, cloning,
+/// converting back and dropping them must keep that count right: a pinned reader that is not
+/// counted would hold back everything again, which the assertions here would notice.
+#[test]
+fn cached_readers_are_counted() {
+    let (mut w, r) = slot(0usize);
+
+    // made, turned back into a plain reader, and made again
+    let c = CachedReader::new(r);
+    let plain = c.into_inner();
+    let mut a = CachedReader::new(plain);
+    let mut b = a.clone();
+    assert_eq!(*a.read(), 0);
+
+    // `b` goes away: `a` must still be recognised as holding only what it read
+    assert_eq!(*b.read(), 0);
+    drop(b);
+    let mut back = Vec::new();
+    for i in 1..=5 {
+        back.extend(w.write(Box::new(i)));
+    }
+    assert_eq!(back.len(), 4, "a pinned reader holds one value back");
+
+    // dropping a pinned reader lets go of the value it held
+    drop(a);
+    assert_eq!(w.try_sync().iter().map(|b| **b).collect::<Vec<_>>(), [0]);
+
+    // no cached reader left: a plain reader behaves as ever
+    let mut plain = w.reader();
+    let g = plain.read();
+    assert!(w.write(Box::new(6)).is_empty());
+    assert!(w.write(Box::new(7)).is_empty());
+    drop(g);
+    assert_eq!(w.try_sync().len(), 2);
+    assert!(!w.has_old_values());
+}
