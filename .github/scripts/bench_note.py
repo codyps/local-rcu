@@ -15,7 +15,8 @@ import sys
 def main():
     sha, *dirs = sys.argv[1:]
     lines = [
-        "Benchmarks recorded by CI (shared runners; indicative only).",
+        "Benchmarks recorded by CI. Counts (instr, allocs, bytes, values) are exact;",
+        "times (ns) are from shared runners and indicative only.",
         "",
     ]
     found = False

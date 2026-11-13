@@ -3,7 +3,9 @@ name: bench-history
 # Record benchmark results for every commit of main and publish a GitHub
 # Pages site showing them over time.
 #
-# - the bench jobs run both bench targets on x86_64 and aarch64, parse the
+# - the bench jobs run `benches/isolated.rs` on x86_64 and aarch64 (the
+#   measurements design decisions are made on: instructions and allocations
+#   per operation, memory, time per read and per write), parse the
 #   output into one JSON record per (commit, arch), and append it as
 #   `data/<commit>.json` to that arch's *orphan* data branch
 #   (`bench-data-x86_64` / `bench-data-aarch64`: no shared history with
@@ -66,10 +68,15 @@ jobs:
         with:
           key: bench-history-${{ matrix.arch }}
 
+      - name: Install valgrind (counts instructions)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
       - name: Run benchmarks
         run: |
-          cargo bench --bench b | tee criterion.txt
-          cargo bench --bench isolated | tee isolated.txt
+          # more passes than the default: this is the only run of this commit
+          BENCH_PASSES=5 cargo bench --bench isolated | tee isolated.txt
           # hardware context for the record (shared-runner pools are
           # heterogeneous; trends must be attributable to a cpu model)
           lscpu | tee lscpu.txt
@@ -79,9 +86,10 @@ jobs:
         run: |
           COMMIT_SHA="$SHA" \
           COMMIT_DATE="$(git show -s --format=%cI HEAD)" \
+          RUSTC_VERSION="$(rustc -V)" \
             python3 .github/scripts/bench_parse.py \
-              criterion.txt isolated.txt "record-$ARCH.json" "$ARCH" \
-              lscpu.txt "$(cat uname.txt)"
+              "record-$ARCH.json" "$ARCH" lscpu.txt "$(cat uname.txt)" \
+              isolated.txt
 
       - name: Append record to the orphan data branch
         run: |
