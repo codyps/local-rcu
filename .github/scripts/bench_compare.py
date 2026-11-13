@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Render what a change does to the benchmarks, as markdown.
 
-Usage: bench_compare.py BASE_JSON HEAD_JSON [BASE_LABEL HEAD_LABEL]
+Usage: bench_compare.py [--renames RENAMES_TXT] BASE_JSON HEAD_JSON [BASE_LABEL HEAD_LABEL]
 
 Both files are records written by bench_parse.py, measured on the same
 machine one right after the other. BASE_JSON may be missing (nothing to
 compare against): the head's numbers are then listed on their own.
+
+RENAMES_TXT (benches/renames.txt) lists benchmarks that were renamed: a base
+result whose name a rename turns into one of the head's is compared against
+it, instead of the two showing up as one benchmark gone and another new.
 
 Counts (instructions, allocations, bytes, values) are exact, so any change in
 them is reported.
@@ -31,6 +35,8 @@ worth chasing.
 import json
 import os
 import sys
+
+import bench_renames
 
 # relative change of the medians below which a time is not called out
 TIME_NOISE = 0.05
@@ -127,9 +133,34 @@ def table(rows):
     return out
 
 
+def match_renamed(base_results, head_results, renames):
+    """Key the base's results by the names they have in the head.
+
+    A base result is moved to its new name only when the head has that name
+    and the base does not already have a result under it. Returns
+    the re-keyed results and the renames that moved at least one result.
+    """
+    keyed, used = {}, []
+    for name, r in base_results.items():
+        new = bench_renames.apply(name, renames)
+        if new != name and new in head_results and new not in base_results and new not in keyed:
+            keyed[new] = r
+            for i, rename in enumerate(renames):
+                if rename not in used and rename[0] in bench_renames.apply(name, renames[:i]):
+                    used.append(rename)
+        else:
+            keyed.setdefault(name, r)
+    return keyed, [r for r in renames if r in used]
+
+
 def main():
-    base_path, head_path = sys.argv[1:3]
-    base_label, head_label = sys.argv[3:5] if len(sys.argv) >= 5 else ("base", "this")
+    args = sys.argv[1:]
+    renames = []
+    if args[:1] == ["--renames"]:
+        renames = bench_renames.load(args[1])
+        args = args[2:]
+    base_path, head_path = args[:2]
+    base_label, head_label = args[2:4] if len(args) >= 4 else ("base", "this")
     base, head = load(base_path), load(head_path)
     if head is None:
         sys.exit(f"no results in {head_path}")
@@ -140,8 +171,10 @@ def main():
         title += f" — {hw['cpu_model']}, {hw.get('cores', '?')} vCPU"
     lines = [title, ""]
 
-    base_results = {r["name"]: r for r in (base or {}).get("results", [])}
     head_results = {r["name"]: r for r in head["results"]}
+    base_results, renamed = match_renamed(
+        {r["name"]: r for r in (base or {}).get("results", [])}, head_results, renames
+    )
     names = list(head_results) + [n for n in base_results if n not in head_results]
 
     counts, times = [], []
@@ -183,6 +216,9 @@ def main():
             "run-to-run noise."
         )
         lines.append("")
+        if renamed:
+            pieces = ", ".join(f"`{old}` → `{new}`" for old, new in renamed)
+            lines += [f"Renamed (`benches/renames.txt`), compared under the new name: {pieces}.", ""]
         if changed_counts:
             lines += ["**Exact counts that changed** (instructions, allocations, bytes, values per operation):", ""]
             lines += table(changed_counts) + [""]

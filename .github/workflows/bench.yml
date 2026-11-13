@@ -106,7 +106,8 @@ jobs:
           # no rows: the baseline has no harness, or one from before this format
           parse base "$BASELINE" || true
           parse cand "$CANDIDATE"
-          python3 .github/scripts/bench_compare.py "$ab/base.json" "$ab/cand.json" \
+          python3 .github/scripts/bench_compare.py --renames benches/renames.txt \
+            "$ab/base.json" "$ab/cand.json" \
             "$(git rev-parse --short "$BASELINE")" "$(git rev-parse --short "$CANDIDATE")" \
             > "$ab/section.md"
           if [ "$(cat "$ab/harness")" = own ]; then

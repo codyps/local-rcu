@@ -147,7 +147,7 @@ jobs:
       - name: Generate site
         run: |
           # generate outside the worktree: the deploy uploads from there
-          python3 .github/scripts/gen_pages.py \
+          python3 .github/scripts/gen_pages.py --renames benches/renames.txt \
             "$RUNNER_TEMP/site/index.html" data-x86_64 data-aarch64
       - name: Attach benchmark summary note to the commit
         run: |

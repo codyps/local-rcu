@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the benchmark-history GitHub Pages site (index.html).
 
-Usage: gen_pages.py OUT_HTML DATA_DIR [DATA_DIR ...]
+Usage: gen_pages.py [--renames RENAMES_TXT] OUT_HTML DATA_DIR [DATA_DIR ...]
 
 Each DATA_DIR contains one JSON file per recorded run (see bench_parse.py).
 The site inlines all records and renders one Chart.js line chart per
@@ -14,6 +14,8 @@ import glob
 import html
 import json
 import sys
+
+import bench_renames
 
 CHARTJS = "https://cdn.jsdelivr.net/npm/chart.js@4"
 
@@ -172,8 +174,15 @@ for (const name of Object.keys(DATA.charts).sort(
 
 
 def main():
-    out_path = sys.argv[1]
-    data_dirs = sys.argv[2:]
+    args = sys.argv[1:]
+    # results recorded under a name benches/renames.txt renames are charted
+    # under the new one
+    renames = []
+    if args[:1] == ["--renames"]:
+        renames = bench_renames.load(args[1])
+        args = args[2:]
+    out_path = args[0]
+    data_dirs = args[1:]
 
     # (commit, arch, bench name) -> point; later files (re-runs) overwrite
     points = {}
@@ -186,6 +195,8 @@ def main():
     for path in sorted(p for d in data_dirs for p in glob.glob(d + "/*.json")):
         nruns += 1
         rec = json.load(open(path))
+        for r in rec["results"]:
+            r["name"] = bench_renames.apply(r["name"], renames)
         if rec["arch"] not in latest or rec["date"] >= latest[rec["arch"]][0]:
             latest[rec["arch"]] = (rec["date"], {r["name"] for r in rec["results"]})
         hw = rec.get("hardware") or {}
