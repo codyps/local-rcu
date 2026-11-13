@@ -1,0 +1,12 @@
+# Benchmarks that were renamed, so their old results line up with the new name.
+#
+# One rename per line: `old -> new`. Each replaces a piece of a benchmark's
+# full name (`isolated/<group>/<scenario>`, as `cargo bench --bench isolated`
+# prints it), so one line covers a scenario in every group it is measured in.
+# Renames apply in order, so a later line can rename a piece an earlier one
+# produced.
+#
+# Read by .github/scripts/bench_compare.py (PR comments: a renamed benchmark
+# is compared against its old name in the base) and gen_pages.py (history:
+# results recorded under an old name are charted under the new one). Keep
+# entries: the history still has results under the old names.
