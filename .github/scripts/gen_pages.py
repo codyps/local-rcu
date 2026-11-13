@@ -5,7 +5,9 @@ Usage: gen_pages.py OUT_HTML DATA_DIR [DATA_DIR ...]
 
 Each DATA_DIR contains one JSON file per recorded run (see bench_parse.py).
 The site inlines all records and renders one Chart.js line chart per
-benchmark, one series per architecture, over commit date.
+benchmark, one series per architecture, over commit date. Only benchmarks
+that the most recent record of some architecture has are shown: the ones a
+later harness no longer produces stay on the data branches.
 """
 
 import glob
@@ -27,6 +29,7 @@ PAGE = """<!DOCTYPE html>
 <style>
  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 2rem; background: #fff; color: #111 }
  h1 { font-size: 1.5rem }
+ h2.group { margin: 2.4rem 0 0; padding-top: .6rem; border-top: 1px solid #ddd }
  h3 { margin: 1.6rem 0 .2rem; font-family: ui-monospace, monospace; font-weight: 600 }
  /* the canvas wrapper (not the canvas) must carry the height: with
     `maintainAspectRatio: false` Chart.js sizes the canvas to its parent,
@@ -40,7 +43,11 @@ PAGE = """<!DOCTYPE html>
 <h1>local-rcu benchmark history</h1>
 <p>One point per commit of <code>main</code> (plus a weekly drift sample).
 Click a commit label below a chart to open that commit.
-Shared-runner noise applies; look at trends, not points.</p>
+Lower is better everywhere.</p>
+<p><b>instructions</b>, <b>allocations</b>, <b>memory</b> and <b>held back</b> are exact
+counts per operation: a step in one of them is a change in the code (or, for
+instructions, in the toolchain). <b>ns per read</b> and <b>ns per write</b> are
+times from shared runners of varying hardware; look at trends, not points.</p>
 <h2>Runners</h2>
 <p id="runners"></p>
 <div id="hwblocks"></div>
@@ -103,11 +110,27 @@ function attachCommitLinks(chart, cvs, commits) {
     if (sha) window.open(DATA.repo + "/commit/" + sha, "_self");
   });
 }
-for (const name of Object.keys(DATA.charts).sort()) {
+// "isolated/<group>/<what>": one heading per group, the exact counts first
+const GROUPS = ["instructions", "allocations", "memory", "held back", "ns per read", "ns per write"];
+const groupOf = (name) => name.split("/")[1] || name;
+const rank = (name) => {
+  const i = GROUPS.indexOf(groupOf(name));
+  return i < 0 ? GROUPS.length : i;
+};
+let lastGroup = null;
+for (const name of Object.keys(DATA.charts).sort(
+    (a, b) => rank(a) - rank(b) || a.localeCompare(b, undefined, { numeric: true }))) {
   const meta = DATA.charts[name];
+  if (groupOf(name) !== lastGroup) {
+    lastGroup = groupOf(name);
+    const g = document.createElement("h2");
+    g.className = "group";
+    g.textContent = lastGroup;
+    container.appendChild(g);
+  }
   const sec = document.createElement("section");
   const h = document.createElement("h3");
-  h.textContent = name + " ";
+  h.textContent = name.split("/").slice(2).join("/") + " ";
   const u = document.createElement("span");
   u.className = "unit";
   u.textContent = "[" + DATA.units[name] + "]";
@@ -159,9 +182,12 @@ def main():
     models = {}  # (arch, commit) -> cpu model (records may predate hardware capture)
     hardware_files = {}  # filename -> full lscpu text
     nruns = 0
+    latest = {}  # arch -> (date, names in that record)
     for path in sorted(p for d in data_dirs for p in glob.glob(d + "/*.json")):
         nruns += 1
         rec = json.load(open(path))
+        if rec["arch"] not in latest or rec["date"] >= latest[rec["arch"]][0]:
+            latest[rec["arch"]] = (rec["date"], {r["name"] for r in rec["results"]})
         hw = rec.get("hardware") or {}
         if hw.get("cpu_model"):
             models[(rec["arch"], rec["commit"])] = hw["cpu_model"]
@@ -181,8 +207,11 @@ def main():
         runner_counts[arch][model] = runner_counts[arch].get(model, 0) + 1
 
     # group per bench name -> arch -> sorted series
+    current = set().union(*(names for _date, names in latest.values())) if latest else set()
     charts = {}
     for (commit, arch, name), value in points.items():
+        if name not in current:
+            continue
         charts.setdefault(name, {}).setdefault(arch, []).append(
             {"commit": commit, "date": dates[(commit, arch, name)], "value": value}
         )

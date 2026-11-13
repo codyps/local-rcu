@@ -1,22 +1,43 @@
 name: bench
 
-# Compare benchmark results between two refs (eg to measure the effect of a
-# change). Runs the criterion benches (`benches/b.rs`) with a saved baseline,
-# and the throughput-table harness (`benches/isolated.rs`), on both commits,
-# then writes the results to the job summary.
+# What a change does to the benchmarks (`benches/isolated.rs`).
+#
+# - on a pull request: measures the base of the PR and the PR (as merged) on
+#   the same runner, one right after the other, on x86_64 and aarch64, and
+#   keeps one comment on the PR up to date with the result.
+# - run by hand: the same for any two refs, written to the job summary.
+#
+# The exact counts (instructions, allocations, bytes) are what to read first:
+# they do not depend on the runner. See bench_ab.sh and bench_compare.py for
+# how the two sides are measured and how the times are compared.
 on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "benches/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yml"
+      - ".github/scripts/bench_*"
   workflow_dispatch:
     inputs:
       baseline:
         description: "baseline ref (without the change)"
         required: true
-        default: "dfc51d8"
+        default: "main"
       candidate:
         description: "candidate ref (with the change)"
         required: true
-        default: "main"
 
 permissions: {}
+
+# a newer push to the PR supersedes the run for the older one
+concurrency:
+  group: bench-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: never
@@ -26,6 +47,8 @@ jobs:
     name: bench-${{ matrix.arch }}
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 45
+    permissions:
+      contents: read
     strategy:
       # want numbers from both arches even if one fails
       fail-fast: false
@@ -35,14 +58,23 @@ jobs:
             runs-on: ubuntu-latest
           - arch: aarch64
             runs-on: ubuntu-24.04-arm
+    # one output per arch: each leg of the matrix sets its own
+    outputs:
+      x86_64: ${{ steps.render.outputs.x86_64 }}
+      aarch64: ${{ steps.render.outputs.aarch64 }}
     env:
-      BASELINE: ${{ inputs.baseline }}
-      CANDIDATE: ${{ inputs.candidate }}
+      ARCH: ${{ matrix.arch }}
+      # a pull request is checked out as merged into its base: the first
+      # parent of that merge is the base it is compared against
+      BASELINE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.baseline }}
+      CANDIDATE: ${{ github.event_name == 'pull_request' && 'HEAD' || inputs.candidate }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # need to be able to check out both refs
           fetch-depth: 0
+          # code from the pull request runs in this job
+          persist-credentials: false
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master@2026-10-16
         with:
@@ -51,44 +83,93 @@ jobs:
         with:
           # both refs are built in this job
           key: bench-${{ matrix.arch }}
-
-      - name: Bench baseline (${{ inputs.baseline }})
+      - name: Install valgrind (counts instructions)
         run: |
-          git checkout --detach "$BASELINE"
-          cargo bench --bench b -- --save-baseline base | tee baseline-criterion.txt
-          # throughput tables: 3 passes to bound runner noise (take the best per config)
-          : > baseline-isolated.txt
-          for _ in 1 2 3; do
-            cargo bench --bench isolated | tee -a baseline-isolated.txt
-          done
+          sudo apt-get update
+          sudo apt-get install -y valgrind
 
-      - name: Bench candidate (${{ inputs.candidate }})
-        run: |
-          git checkout --detach "$CANDIDATE"
-          cargo bench --bench b -- --baseline base | tee candidate-criterion.txt
-          : > candidate-isolated.txt
-          for _ in 1 2 3; do
-            cargo bench --bench isolated | tee -a candidate-isolated.txt
-          done
+      - name: Measure both refs
+        run: .github/scripts/bench_ab.sh "$BASELINE" "$CANDIDATE" "$RUNNER_TEMP/ab"
 
-      - name: Summarize
-        if: always()
+      - name: Compare
+        id: render
         run: |
+          ab="$RUNNER_TEMP/ab"
+          lscpu > "$ab/lscpu.txt"
+          export RUSTC_VERSION="$(rustc -V)"
+          parse() {
+            COMMIT_SHA="$(git rev-parse "$2")" \
+            COMMIT_DATE="$(git show -s --format=%cI "$2")" \
+              python3 .github/scripts/bench_parse.py \
+                "$ab/$1.json" "$ARCH" "$ab/lscpu.txt" "$(uname -a)" "$ab/$1.txt"
+          }
+          # no rows: the baseline has no harness, or one from before this format
+          parse base "$BASELINE" || true
+          parse cand "$CANDIDATE"
+          python3 .github/scripts/bench_compare.py "$ab/base.json" "$ab/cand.json" \
+            "$(git rev-parse --short "$BASELINE")" "$(git rev-parse --short "$CANDIDATE")" \
+            > "$ab/section.md"
+          if [ "$(cat "$ab/harness")" = own ]; then
+            {
+              echo "The base was measured with its own version of the benchmarks: this change's version does not build against it."
+              echo
+            } >> "$ab/section.md"
+          fi
+          cat "$ab/section.md" >> "$GITHUB_STEP_SUMMARY"
           {
-            echo "# bench: \`$BASELINE\` (baseline) → \`$CANDIDATE\` (candidate) — ${{ matrix.arch }}"
+            echo "$ARCH<<END_OF_BENCH_SECTION"
+            cat "$ab/section.md"
+            echo "END_OF_BENCH_SECTION"
+          } >> "$GITHUB_OUTPUT"
+
+  comment:
+    name: comment on the pull request
+    needs: bench
+    # also when one arch failed: post what there is
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      # nothing is checked out here: this job has a token that can write
+      - name: Create or update the comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          X86_64: ${{ needs.bench.outputs.x86_64 }}
+          AARCH64: ${{ needs.bench.outputs.aarch64 }}
+        run: |
+          marker='<!-- bench-compare -->'
+          {
+            echo "$marker"
+            echo "## Benchmarks: what this PR changes"
             echo
-            echo '```'
-            rustc -vV | grep -E '^(host|release)'
-            uname -a
-            lscpu
+            echo "Base of the PR against the PR as merged (${HEAD_SHA:0:8}), measured back to back on the same runner. Counts are exact; times are from shared runners."
             echo
-            echo "## criterion — candidate vs baseline (change %)"
-            cat candidate-criterion.txt
-            echo
-            echo "## isolated throughput — baseline (3 passes)"
-            grep -E '^(reader|writer)' baseline-isolated.txt
-            echo
-            echo "## isolated throughput — candidate (3 passes)"
-            grep -E '^(reader|writer)' candidate-isolated.txt
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+            for section in "$X86_64" "$AARCH64"; do
+              if [ -n "$section" ]; then
+                printf '%s\n\n' "$section"
+              fi
+            done
+            if [ -z "$X86_64" ] || [ -z "$AARCH64" ]; then
+              echo "Some results are missing: see the run."
+              echo
+            fi
+            echo "[run]($RUN_URL) · [history](https://codyps.github.io/local-rcu/)"
+          } > body.md
+
+          # pull requests from forks get a read-only token: the job summaries
+          # of the bench jobs have the same content
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n 1) || id=
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@body.md > /dev/null \
+              || echo "::warning::could not update the benchmark comment"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@body.md > /dev/null \
+              || echo "::warning::could not post the benchmark comment"
+          fi
