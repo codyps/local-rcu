@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/codyps/local-rcu/compare/v1.1.1...v1.2.0) - 2026-11-13
+
+### Added
+
+- a pinned CachedReader only holds back the value it read (opt-in cost) ([#19](https://github.com/codyps/local-rcu/pull/19))
+
+### Other
+
+- record what decisions are made on; comment on PRs with their effect ([#22](https://github.com/codyps/local-rcu/pull/22))
+- fewer allocations; add write_into() and try_sync_into() ([#21](https://github.com/codyps/local-rcu/pull/21))
+- Update README with library advantages and remove alternatives
+
 ## [1.1.1](https://github.com/codyps/local-rcu/compare/v1.1.0...v1.1.1) - 2026-11-12
 
 ### Other
