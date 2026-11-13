@@ -12,19 +12,30 @@ them is reported.
 
 Times come from a shared runner, and the ones with several threads also depend
 on which CPUs the threads land on: the same code measured twice can differ by
-tens of percent. Each side is therefore measured several times (`runs` in the
-record), and a time is only called out when every run of one side is better
-than every run of the other, and the best values differ by more than
-TIME_NOISE. With 4 runs a side, chance alone separates them like that for
-about 1 row in 35.
+tens of percent, and some configurations have two speeds they switch between.
+Each side is therefore measured many times, alternating (`runs` in the
+record). The value shown for a time is the median of its runs, and a time is
+only called out when both hold:
+
+- the medians differ by more than TIME_NOISE, and
+- a Mann-Whitney U test on the runs of the two sides gives p < TIME_P, that
+  is, the runs of one side rank almost entirely below those of the other.
+
+With 10 runs a side and nothing changed, that should call out one row in
+several hundred. What it cannot tell apart from a change in the code is a
+difference between the two builds that has nothing to do with the change
+(code alignment, say): small, steady differences in a single row are not
+worth chasing.
 """
 
 import json
 import os
 import sys
 
-# relative change of the best values below which a time is not called out
+# relative change of the medians below which a time is not called out
 TIME_NOISE = 0.05
+# two-sided p of the rank test above which a time is not called out
+TIME_P = 0.001
 # counts are exact; this only hides rounding in the printed values
 COUNT_NOISE = 0.002
 
@@ -65,14 +76,40 @@ def cell(value, unit, runs):
         return "–"
     text = f"{fmt(value, unit)} {unit}"
     if runs and len(runs) > 1:
-        # the best is the value; the worst shows how far apart the runs were
-        text += f" (… {fmt(max(runs), unit)})"
+        text += f" ({fmt(min(runs), unit)} … {fmt(max(runs), unit)})"
     return text
 
 
-def separated(a, b):
-    """Is every run of one side better than every run of the other?"""
-    return max(a) < min(b) or max(b) < min(a)
+def median(xs):
+    xs = sorted(xs)
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+def rank_test(a, b):
+    """Two-sided p of the Mann-Whitney U test for samples `a` and `b`.
+
+    Exact (the distribution of U is counted, not approximated), but for
+    samples without ties; a tie counts as half, which is close enough for a
+    threshold.
+    """
+    n, m = len(a), len(b)
+    u = sum(1.0 if x < y else 0.5 if x == y else 0.0 for x in a for y in b)
+    u = min(u, n * m - u)
+    # ways[i][j][k]: orderings of i runs of a and j of b with U == k
+    ways = [[[0] * (n * m + 1) for _ in range(m + 1)] for _ in range(n + 1)]
+    for i in range(n + 1):
+        for j in range(m + 1):
+            if i == 0 or j == 0:
+                ways[i][j][0] = 1
+                continue
+            for k in range(i * j + 1):
+                # the largest value is one of b (nothing changes), or one of
+                # a (it is above all j of b)
+                ways[i][j][k] = ways[i][j - 1][k] + (ways[i - 1][j][k - j] if k >= j else 0)
+    total = sum(ways[n][m])
+    below = sum(ways[n][m][k] for k in range(n * m + 1) if k <= u)
+    return min(1.0, 2 * below / total)
 
 
 def table(rows):
@@ -113,8 +150,13 @@ def main():
         unit = (h or b)["unit"]
         bv = b["value"] if b else None
         hv = h["value"] if h else None
-        c = change(bv, hv) if b and h else None
         runs = lambda r: (r.get("runs") or [r["value"]]) if r else None
+        if unit == "ns":
+            # the record's value is the best run: fine for a history, but the
+            # best of a handful of runs is what moves most between two sides
+            bv = median(runs(b)) if b else None
+            hv = median(runs(h)) if h else None
+        c = change(bv, hv) if b and h else None
         row = (name.removeprefix("isolated/"), unit, bv, hv, c, runs(b), runs(h))
         (times if unit == "ns" else counts).append(row)
 
@@ -124,7 +166,7 @@ def main():
             return True
         if c is None or abs(c) <= noise:
             return c is None
-        return unit != "ns" or separated(base_runs, head_runs)
+        return unit != "ns" or rank_test(base_runs, head_runs) < TIME_P
 
     if base is None:
         lines += [
@@ -146,15 +188,15 @@ def main():
             lines += table(changed_counts) + [""]
         if changed_times:
             lines += [
-                "**Times that moved** (every run of one side beats every run of "
-                f"the other, best values more than {TIME_NOISE * 100:.0f}% apart; "
+                f"**Times that moved** (medians more than {TIME_NOISE * 100:.0f}% apart, "
+                f"and a rank test over the runs of both sides gives p < {TIME_P}; "
                 "shared runner, so still a hint and not a measurement):",
                 "",
             ]
             lines += table(changed_times) + [""]
 
     lines += [
-        "<details><summary>All results (times: best run, and the worst in brackets)</summary>",
+        "<details><summary>All results (times: median of the runs, best and worst in brackets)</summary>",
         "",
     ]
     lines += table(counts + times)

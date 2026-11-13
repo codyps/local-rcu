@@ -16,16 +16,19 @@
 #   has are reported as new or gone.
 # - `none`: the baseline has no harness that builds; base.txt stays empty.
 #
-# The two sides alternate for ROUNDS rounds (default 4), so that a slow
-# stretch of a shared runner does not land on one side only, and so that
-# bench_compare.py can tell a change from the spread between rounds. The
-# instruction counts are exact and only taken in the first round.
+# The two sides alternate for ROUNDS rounds (default 10) of one pass each, so
+# that a slow stretch of a shared runner does not land on one side only, and
+# so that bench_compare.py has enough runs of each side to tell a change from
+# the spread between runs. Many short rounds rather than a few long ones:
+# what varies is where the threads of a run end up, not the time within one.
+# The instruction counts are exact and only taken in the first round.
 set -euo pipefail
 
 base_ref=$1
 cand_ref=$2
 out=$3
-rounds=${ROUNDS:-4}
+rounds=${ROUNDS:-10}
+export BENCH_PASSES=${BENCH_PASSES:-1}
 
 root=$(git rev-parse --show-toplevel)
 # one target directory for both: the dependencies are built once
