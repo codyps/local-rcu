@@ -22,12 +22,23 @@
 # the spread between runs. Many short rounds rather than a few long ones:
 # what varies is where the threads of a run end up, not the time within one.
 # The instruction counts are exact and only taken in the first round.
+#
+# Each side is built LAYOUTS times (default 5), each time with its functions
+# in a different order (lld's --shuffle-sections, seeded 1..LAYOUTS), and the
+# rounds go through those builds in turn. Where a function lands decides how
+# its loops line up with cache lines and fetch windows, and that alone can
+# move a time by ~10% on some CPUs: a change that only renames a function
+# reorders the others, and with one build a side it shows up as a change in
+# speed. Measured over several layouts, that lands in the spread of each side
+# instead, and only what holds whatever the layout is called out. The
+# dependencies are built once: only the harness binary is linked again.
 set -euo pipefail
 
 base_ref=$1
 cand_ref=$2
 out=$3
 rounds=${ROUNDS:-10}
+layouts=${LAYOUTS:-5}
 export BENCH_PASSES=${BENCH_PASSES:-1}
 
 root=$(git rev-parse --show-toplevel)
@@ -49,8 +60,32 @@ mkdir -p "$out"
 : > "$out/base.txt"
 : > "$out/cand.txt"
 
+mkdir -p "$work/bin"
+
+# build side $1 with function order $2, as $work/bin/$1-$2
+build() {
+  local exe
+  exe=$(
+    cd "$work/$1" &&
+      cargo rustc --profile bench --bench isolated --message-format=json-render-diagnostics -- \
+        -C link-arg=-fuse-ld=lld -C "link-arg=-Wl,--shuffle-sections=.text*=$2" |
+      python3 -c '
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("reason") == "compiler-artifact" and msg.get("executable"):
+        print(msg["executable"])
+'
+  ) || return 1
+  [ -n "$exe" ] && cp "$exe" "$work/bin/$1-$2"
+}
+
+# every layout of side $1
 builds() {
-  (cd "$work/$1" && cargo bench --bench isolated --no-run) >&2
+  local seed
+  for seed in $(seq "$layouts"); do
+    build "$1" "$seed" >&2 || return 1
+  done
 }
 
 builds cand
@@ -71,13 +106,14 @@ for round in $(seq "$rounds"); do
     if [ "$side" = base ] && [ "$harness" = none ]; then
       continue
     fi
-    echo "== round $round: $side" >&2
+    layout=$(( (round - 1) % layouts + 1 ))
+    echo "== round $round: $side, layout $layout" >&2
     (
       cd "$work/$side"
       if [ "$round" != 1 ]; then
         export BENCH_NO_VALGRIND=1
       fi
-      cargo bench --bench isolated
+      "$work/bin/$side-$layout"
     ) | tee -a "$out/$side.txt" >&2
   done
 done
