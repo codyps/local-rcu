@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/codyps/local-rcu/compare/v1.1.1...v1.2.0) - 2026-11-14
+
+### Added
+
+- a pinned CachedReader only holds back the value it read (opt-in cost) ([#19](https://github.com/codyps/local-rcu/pull/19))
+
+### Other
+
+- rename write_into() to write_sync_into() ([#27](https://github.com/codyps/local-rcu/pull/27))
+- measure each side of a benchmark comparison over several code layouts ([#30](https://github.com/codyps/local-rcu/pull/30))
+- follow benchmark renames in PR comments and history ([#28](https://github.com/codyps/local-rcu/pull/28))
+- bump actions/configure-pages from 5.0.0 to 6.0.0 ([#24](https://github.com/codyps/local-rcu/pull/24))
+- bump actions/upload-pages-artifact from 3.0.0 to 5.0.0 ([#25](https://github.com/codyps/local-rcu/pull/25))
+- bump actions/deploy-pages from 4.0.5 to 5.0.1 ([#23](https://github.com/codyps/local-rcu/pull/23))
+- record what decisions are made on; comment on PRs with their effect ([#22](https://github.com/codyps/local-rcu/pull/22))
+- fewer allocations; add write_into() and try_sync_into() ([#21](https://github.com/codyps/local-rcu/pull/21))
+- Update README with library advantages and remove alternatives
+
 ## [1.1.1](https://github.com/codyps/local-rcu/compare/v1.1.0...v1.1.1) - 2026-11-12
 
 ### Other
