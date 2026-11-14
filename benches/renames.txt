@@ -10,3 +10,5 @@
 # is compared against its old name in the base) and gen_pages.py (history:
 # results recorded under an old name are charted under the new one). Keep
 # entries: the history still has results under the old names.
+
+write_into() -> write_sync_into()
