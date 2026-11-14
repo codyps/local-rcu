@@ -1,0 +1,130 @@
+Benchmarks recorded by CI. Counts (instr, allocs, bytes, values) are exact;
+times (ns) are from shared runners and indicative only.
+
+x86_64 (Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz, 4 vCPU):
+  isolated/allocations/read(), plain reader                                               0 allocs
+  isolated/allocations/read(), CachedReader, value unchanged                              0 allocs
+  isolated/allocations/write(), no readers                                                2 allocs
+  isolated/allocations/write(), 1 idle reader                                             2 allocs
+  isolated/allocations/write(), 6 idle readers                                            2 allocs
+  isolated/allocations/write(), 1 reader reads after each write                           2 allocs
+  isolated/allocations/write(), 1 guard held across each write                            2 allocs
+  isolated/allocations/write(), 6 guards held across each write                           2 allocs
+  isolated/allocations/write(), 1 guard held throughout                                   1 allocs
+  isolated/allocations/write(), 1 idle pinned CachedReader                                2 allocs
+  isolated/allocations/write(), 1 CachedReader reads after each write                     2 allocs
+  isolated/allocations/write_sync_into(), no readers                                      1 allocs
+  isolated/allocations/write_sync_into(), 1 reader reads after each write                 1 allocs
+  isolated/allocations/write_sync_into() reusing boxes, no readers                        0 allocs
+  isolated/allocations/write_sync_into() reusing boxes, 1 reader reads after each write   0 allocs
+  isolated/allocations/write_nosync() + try_sync() every 128, 1 idle reader               1.01 allocs
+  isolated/instructions/read(), plain reader                                              16 instr
+  isolated/instructions/read(), CachedReader, value unchanged                             8 instr
+  isolated/instructions/write(), no readers                                               484 instr
+  isolated/instructions/write(), 1 idle reader                                            496 instr
+  isolated/instructions/write(), 6 idle readers                                           556 instr
+  isolated/instructions/write(), 1 reader reads after each write                          518 instr
+  isolated/instructions/write(), 1 guard held across each write                           713 instr
+  isolated/instructions/write(), 6 guards held across each write                          987 instr
+  isolated/instructions/write(), 1 guard held throughout                                  261195 instr
+  isolated/instructions/write(), 1 idle pinned CachedReader                               633 instr
+  isolated/instructions/write(), 1 CachedReader reads after each write                    887 instr
+  isolated/instructions/write_sync_into(), no readers                                     298 instr
+  isolated/instructions/write_sync_into(), 1 reader reads after each write                349 instr
+  isolated/instructions/write_sync_into() reusing boxes, no readers                       220 instr
+  isolated/instructions/write_sync_into() reusing boxes, 1 reader reads after each write  265 instr
+  isolated/instructions/write_nosync() + try_sync() every 128, 1 idle reader              379.1 instr
+  isolated/memory/slot with no readers (32 byte value)                                    544 bytes
+  isolated/memory/each reader (of 1024)                                                   272 bytes
+  isolated/held back/1 idle pinned CachedReader, after 100000 writes                      1 values
+  isolated/ns per write/write(), 1 guard held throughout (2000 values held back)          2776.36 ns
+  isolated/ns per write/write(), 2 guards held throughout (2000 values held back)         3376.45 ns
+  isolated/ns per write/write(), 6 guards held throughout (2000 values held back)         10791 ns
+  isolated/ns per write/write(), no readers                                               47.11 ns
+  isolated/ns per write/write_sync_into(), no readers                                     37.73 ns
+  isolated/ns per write/write_sync_into() reusing boxes, no readers                       30.03 ns
+  isolated/ns per write/write_nosync() + try_sync() every 128, no readers                 39.01 ns
+  isolated/ns per read/R=1 plain, no writer                                               8.07 ns
+  isolated/ns per read/R=1 cached, no writer                                              0.61 ns
+  isolated/ns per read/R=1 plain, writer: write()                                         54.7 ns
+  isolated/ns per write/write(), R=1 plain readers                                        300.08 ns
+  isolated/ns per read/R=1 cached, writer: write()                                        1.37 ns
+  isolated/ns per write/write(), R=1 cached readers                                       321.51 ns
+  isolated/ns per write/write_sync_into(), R=1 plain readers                              270.41 ns
+  isolated/ns per write/write_sync_into() reusing boxes, R=1 plain readers                260.26 ns
+  isolated/ns per read/R=1 plain, writer: write_nosync() + try_sync() every 128           17.98 ns
+  isolated/ns per write/write_nosync() + try_sync() every 128, R=1 plain readers          203.59 ns
+  isolated/ns per read/R=3 plain, no writer                                               10 ns
+  isolated/ns per read/R=3 cached, no writer                                              0.91 ns
+  isolated/ns per read/R=3 plain, writer: write()                                         28.51 ns
+  isolated/ns per write/write(), R=3 plain readers                                        406.77 ns
+  isolated/ns per read/R=3 cached, writer: write()                                        2.44 ns
+  isolated/ns per write/write(), R=3 cached readers                                       385.42 ns
+  isolated/ns per write/write_sync_into(), R=3 plain readers                              398.38 ns
+  isolated/ns per write/write_sync_into() reusing boxes, R=3 plain readers                381.33 ns
+  isolated/ns per read/R=3 plain, writer: write_nosync() + try_sync() every 128           25.56 ns
+  isolated/ns per write/write_nosync() + try_sync() every 128, R=3 plain readers          213.73 ns
+
+aarch64 (Neoverse-N2, 4 vCPU):
+  isolated/allocations/read(), plain reader                                               0 allocs
+  isolated/allocations/read(), CachedReader, value unchanged                              0 allocs
+  isolated/allocations/write(), no readers                                                2 allocs
+  isolated/allocations/write(), 1 idle reader                                             2 allocs
+  isolated/allocations/write(), 6 idle readers                                            2 allocs
+  isolated/allocations/write(), 1 reader reads after each write                           2 allocs
+  isolated/allocations/write(), 1 guard held across each write                            2 allocs
+  isolated/allocations/write(), 6 guards held across each write                           2 allocs
+  isolated/allocations/write(), 1 guard held throughout                                   1 allocs
+  isolated/allocations/write(), 1 idle pinned CachedReader                                2 allocs
+  isolated/allocations/write(), 1 CachedReader reads after each write                     2 allocs
+  isolated/allocations/write_sync_into(), no readers                                      1 allocs
+  isolated/allocations/write_sync_into(), 1 reader reads after each write                 1 allocs
+  isolated/allocations/write_sync_into() reusing boxes, no readers                        0 allocs
+  isolated/allocations/write_sync_into() reusing boxes, 1 reader reads after each write   0 allocs
+  isolated/allocations/write_nosync() + try_sync() every 128, 1 idle reader               1.01 allocs
+  isolated/instructions/read(), plain reader                                              16 instr
+  isolated/instructions/read(), CachedReader, value unchanged                             8 instr
+  isolated/instructions/write(), no readers                                               654 instr
+  isolated/instructions/write(), 1 idle reader                                            666 instr
+  isolated/instructions/write(), 6 idle readers                                           726 instr
+  isolated/instructions/write(), 1 reader reads after each write                          687 instr
+  isolated/instructions/write(), 1 guard held across each write                           867 instr
+  isolated/instructions/write(), 6 guards held across each write                          1131 instr
+  isolated/instructions/write(), 1 guard held throughout                                  241630 instr
+  isolated/instructions/write(), 1 idle pinned CachedReader                               792 instr
+  isolated/instructions/write(), 1 CachedReader reads after each write                    1025 instr
+  isolated/instructions/write_sync_into(), no readers                                     385 instr
+  isolated/instructions/write_sync_into(), 1 reader reads after each write                437 instr
+  isolated/instructions/write_sync_into() reusing boxes, no readers                       212 instr
+  isolated/instructions/write_sync_into() reusing boxes, 1 reader reads after each write  258 instr
+  isolated/instructions/write_nosync() + try_sync() every 128, 1 idle reader              278.9 instr
+  isolated/memory/slot with no readers (32 byte value)                                    544 bytes
+  isolated/memory/each reader (of 1024)                                                   272 bytes
+  isolated/held back/1 idle pinned CachedReader, after 100000 writes                      1 values
+  isolated/ns per write/write(), 1 guard held throughout (2000 values held back)          2520.89 ns
+  isolated/ns per write/write(), 2 guards held throughout (2000 values held back)         2967.16 ns
+  isolated/ns per write/write(), 6 guards held throughout (2000 values held back)         10418.5 ns
+  isolated/ns per write/write(), no readers                                               52.42 ns
+  isolated/ns per write/write_sync_into(), no readers                                     34.99 ns
+  isolated/ns per write/write_sync_into() reusing boxes, no readers                       26.76 ns
+  isolated/ns per write/write_nosync() + try_sync() every 128, no readers                 25.77 ns
+  isolated/ns per read/R=1 plain, no writer                                               6.47 ns
+  isolated/ns per read/R=1 cached, no writer                                              0.5 ns
+  isolated/ns per read/R=1 plain, writer: write()                                         75.1 ns
+  isolated/ns per write/write(), R=1 plain readers                                        171.46 ns
+  isolated/ns per read/R=1 cached, writer: write()                                        1.24 ns
+  isolated/ns per write/write(), R=1 cached readers                                       195.46 ns
+  isolated/ns per write/write_sync_into(), R=1 plain readers                              167.06 ns
+  isolated/ns per write/write_sync_into() reusing boxes, R=1 plain readers                150.36 ns
+  isolated/ns per read/R=1 plain, writer: write_nosync() + try_sync() every 128           10.14 ns
+  isolated/ns per write/write_nosync() + try_sync() every 128, R=1 plain readers          62.45 ns
+  isolated/ns per read/R=3 plain, no writer                                               6.47 ns
+  isolated/ns per read/R=3 cached, no writer                                              0.5 ns
+  isolated/ns per read/R=3 plain, writer: write()                                         35.76 ns
+  isolated/ns per write/write(), R=3 plain readers                                        237.67 ns
+  isolated/ns per read/R=3 cached, writer: write()                                        1.31 ns
+  isolated/ns per write/write(), R=3 cached readers                                       229.38 ns
+  isolated/ns per write/write_sync_into(), R=3 plain readers                              252.67 ns
+  isolated/ns per write/write_sync_into() reusing boxes, R=3 plain readers                265.38 ns
+  isolated/ns per read/R=3 plain, writer: write_nosync() + try_sync() every 128           10.76 ns
+  isolated/ns per write/write_nosync() + try_sync() every 128, R=3 plain readers          75.27 ns
