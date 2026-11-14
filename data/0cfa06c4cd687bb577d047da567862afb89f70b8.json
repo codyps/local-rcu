@@ -1,0 +1,323 @@
+{
+ "arch": "x86_64",
+ "commit": "0cfa06c4cd687bb577d047da567862afb89f70b8",
+ "date": "2026-11-13T22:48:06-05:00",
+ "hardware": {
+  "cores": "4",
+  "cpu_model": "AMD EPYC 9V45 96-Core Processor",
+  "uname": "Linux runnervmccnms 7.0.0-1019-azure #20-Ubuntu SMP PREEMPT Mon Oct 19 22:41:16 UTC 2026 x86_64 GNU/Linux"
+ },
+ "results": [
+  {
+   "name": "isolated/allocations/read(), plain reader",
+   "unit": "allocs",
+   "value": 0.0
+  },
+  {
+   "name": "isolated/allocations/read(), CachedReader, value unchanged",
+   "unit": "allocs",
+   "value": 0.0
+  },
+  {
+   "name": "isolated/allocations/write(), no readers",
+   "unit": "allocs",
+   "value": 2.0
+  },
+  {
+   "name": "isolated/allocations/write(), 1 idle reader",
+   "unit": "allocs",
+   "value": 2.0
+  },
+  {
+   "name": "isolated/allocations/write(), 6 idle readers",
+   "unit": "allocs",
+   "value": 2.0
+  },
+  {
+   "name": "isolated/allocations/write(), 1 reader reads after each write",
+   "unit": "allocs",
+   "value": 2.0
+  },
+  {
+   "name": "isolated/allocations/write(), 1 guard held across each write",
+   "unit": "allocs",
+   "value": 2.0
+  },
+  {
+   "name": "isolated/allocations/write(), 6 guards held across each write",
+   "unit": "allocs",
+   "value": 2.0
+  },
+  {
+   "name": "isolated/allocations/write(), 1 guard held throughout",
+   "unit": "allocs",
+   "value": 1.0
+  },
+  {
+   "name": "isolated/allocations/write(), 1 idle pinned CachedReader",
+   "unit": "allocs",
+   "value": 2.0
+  },
+  {
+   "name": "isolated/allocations/write(), 1 CachedReader reads after each write",
+   "unit": "allocs",
+   "value": 2.0
+  },
+  {
+   "name": "isolated/allocations/write_sync_into(), no readers",
+   "unit": "allocs",
+   "value": 1.0
+  },
+  {
+   "name": "isolated/allocations/write_sync_into(), 1 reader reads after each write",
+   "unit": "allocs",
+   "value": 1.0
+  },
+  {
+   "name": "isolated/allocations/write_sync_into() reusing boxes, no readers",
+   "unit": "allocs",
+   "value": 0.0
+  },
+  {
+   "name": "isolated/allocations/write_sync_into() reusing boxes, 1 reader reads after each write",
+   "unit": "allocs",
+   "value": 0.0
+  },
+  {
+   "name": "isolated/allocations/write_nosync() + try_sync() every 128, 1 idle reader",
+   "unit": "allocs",
+   "value": 1.01
+  },
+  {
+   "name": "isolated/instructions/read(), plain reader",
+   "unit": "instr",
+   "value": 16.0
+  },
+  {
+   "name": "isolated/instructions/read(), CachedReader, value unchanged",
+   "unit": "instr",
+   "value": 8.0
+  },
+  {
+   "name": "isolated/instructions/write(), no readers",
+   "unit": "instr",
+   "value": 484.0
+  },
+  {
+   "name": "isolated/instructions/write(), 1 idle reader",
+   "unit": "instr",
+   "value": 496.0
+  },
+  {
+   "name": "isolated/instructions/write(), 6 idle readers",
+   "unit": "instr",
+   "value": 556.0
+  },
+  {
+   "name": "isolated/instructions/write(), 1 reader reads after each write",
+   "unit": "instr",
+   "value": 518.0
+  },
+  {
+   "name": "isolated/instructions/write(), 1 guard held across each write",
+   "unit": "instr",
+   "value": 713.0
+  },
+  {
+   "name": "isolated/instructions/write(), 6 guards held across each write",
+   "unit": "instr",
+   "value": 987.0
+  },
+  {
+   "name": "isolated/instructions/write(), 1 guard held throughout",
+   "unit": "instr",
+   "value": 261195.3
+  },
+  {
+   "name": "isolated/instructions/write(), 1 idle pinned CachedReader",
+   "unit": "instr",
+   "value": 633.0
+  },
+  {
+   "name": "isolated/instructions/write(), 1 CachedReader reads after each write",
+   "unit": "instr",
+   "value": 887.0
+  },
+  {
+   "name": "isolated/instructions/write_sync_into(), no readers",
+   "unit": "instr",
+   "value": 298.0
+  },
+  {
+   "name": "isolated/instructions/write_sync_into(), 1 reader reads after each write",
+   "unit": "instr",
+   "value": 349.0
+  },
+  {
+   "name": "isolated/instructions/write_sync_into() reusing boxes, no readers",
+   "unit": "instr",
+   "value": 220.0
+  },
+  {
+   "name": "isolated/instructions/write_sync_into() reusing boxes, 1 reader reads after each write",
+   "unit": "instr",
+   "value": 265.0
+  },
+  {
+   "name": "isolated/instructions/write_nosync() + try_sync() every 128, 1 idle reader",
+   "unit": "instr",
+   "value": 379.1
+  },
+  {
+   "name": "isolated/memory/slot with no readers (32 byte value)",
+   "unit": "bytes",
+   "value": 544.0
+  },
+  {
+   "name": "isolated/memory/each reader (of 1024)",
+   "unit": "bytes",
+   "value": 272.0
+  },
+  {
+   "name": "isolated/held back/1 idle pinned CachedReader, after 100000 writes",
+   "unit": "values",
+   "value": 1.0
+  },
+  {
+   "name": "isolated/ns per write/write(), 1 guard held throughout (2000 values held back)",
+   "unit": "ns",
+   "value": 1608.38
+  },
+  {
+   "name": "isolated/ns per write/write(), 2 guards held throughout (2000 values held back)",
+   "unit": "ns",
+   "value": 1804.03
+  },
+  {
+   "name": "isolated/ns per write/write(), 6 guards held throughout (2000 values held back)",
+   "unit": "ns",
+   "value": 4269.42
+  },
+  {
+   "name": "isolated/ns per write/write(), no readers",
+   "unit": "ns",
+   "value": 31.96
+  },
+  {
+   "name": "isolated/ns per write/write_sync_into(), no readers",
+   "unit": "ns",
+   "value": 25.07
+  },
+  {
+   "name": "isolated/ns per write/write_sync_into() reusing boxes, no readers",
+   "unit": "ns",
+   "value": 21.52
+  },
+  {
+   "name": "isolated/ns per write/write_nosync() + try_sync() every 128, no readers",
+   "unit": "ns",
+   "value": 25.68
+  },
+  {
+   "name": "isolated/ns per read/R=1 plain, no writer",
+   "unit": "ns",
+   "value": 4.65
+  },
+  {
+   "name": "isolated/ns per read/R=1 cached, no writer",
+   "unit": "ns",
+   "value": 0.46
+  },
+  {
+   "name": "isolated/ns per read/R=1 plain, writer: write()",
+   "unit": "ns",
+   "value": 30.55
+  },
+  {
+   "name": "isolated/ns per write/write(), R=1 plain readers",
+   "unit": "ns",
+   "value": 112.8
+  },
+  {
+   "name": "isolated/ns per read/R=1 cached, writer: write()",
+   "unit": "ns",
+   "value": 0.84
+  },
+  {
+   "name": "isolated/ns per write/write(), R=1 cached readers",
+   "unit": "ns",
+   "value": 113.99
+  },
+  {
+   "name": "isolated/ns per write/write_sync_into(), R=1 plain readers",
+   "unit": "ns",
+   "value": 109.28
+  },
+  {
+   "name": "isolated/ns per write/write_sync_into() reusing boxes, R=1 plain readers",
+   "unit": "ns",
+   "value": 106.52
+  },
+  {
+   "name": "isolated/ns per read/R=1 plain, writer: write_nosync() + try_sync() every 128",
+   "unit": "ns",
+   "value": 8.26
+  },
+  {
+   "name": "isolated/ns per write/write_nosync() + try_sync() every 128, R=1 plain readers",
+   "unit": "ns",
+   "value": 77.58
+  },
+  {
+   "name": "isolated/ns per read/R=3 plain, no writer",
+   "unit": "ns",
+   "value": 5.15
+  },
+  {
+   "name": "isolated/ns per read/R=3 cached, no writer",
+   "unit": "ns",
+   "value": 0.7
+  },
+  {
+   "name": "isolated/ns per read/R=3 plain, writer: write()",
+   "unit": "ns",
+   "value": 17.81
+  },
+  {
+   "name": "isolated/ns per write/write(), R=3 plain readers",
+   "unit": "ns",
+   "value": 178.3
+  },
+  {
+   "name": "isolated/ns per read/R=3 cached, writer: write()",
+   "unit": "ns",
+   "value": 1.62
+  },
+  {
+   "name": "isolated/ns per write/write(), R=3 cached readers",
+   "unit": "ns",
+   "value": 149.61
+  },
+  {
+   "name": "isolated/ns per write/write_sync_into(), R=3 plain readers",
+   "unit": "ns",
+   "value": 178.84
+  },
+  {
+   "name": "isolated/ns per write/write_sync_into() reusing boxes, R=3 plain readers",
+   "unit": "ns",
+   "value": 176.82
+  },
+  {
+   "name": "isolated/ns per read/R=3 plain, writer: write_nosync() + try_sync() every 128",
+   "unit": "ns",
+   "value": 13.1
+  },
+  {
+   "name": "isolated/ns per write/write_nosync() + try_sync() every 128, R=3 plain readers",
+   "unit": "ns",
+   "value": 85.65
+  }
+ ],
+ "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)"
+}
