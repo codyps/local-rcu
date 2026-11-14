@@ -38,6 +38,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: never
+  # code alignment that does not move with unrelated changes: see bench.yml
+  RUSTFLAGS: -C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=6
 
 jobs:
   bench:

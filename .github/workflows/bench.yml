@@ -41,6 +41,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: never
+  # Start every function and every block that is only reached by a jump (loop
+  # heads, say) on a 64-byte boundary. Otherwise a change that only moves code
+  # (a rename that reorders functions, say) can move a hot loop across a
+  # cache-line or fetch-window boundary and shift a time by ~10% on some CPUs
+  # while running exactly the same instructions. The same flags as in
+  # bench-history.yml, so the history and the PR comments measure one build.
+  RUSTFLAGS: -C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=6
 
 jobs:
   bench:
