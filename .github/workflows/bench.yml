@@ -83,10 +83,11 @@ jobs:
         with:
           # both refs are built in this job
           key: bench-${{ matrix.arch }}
-      - name: Install valgrind (counts instructions)
+      # lld: each side is built with several function orders (bench_ab.sh)
+      - name: Install valgrind (counts instructions) and lld
         run: |
           sudo apt-get update
-          sudo apt-get install -y valgrind
+          sudo apt-get install -y valgrind lld
 
       - name: Measure both refs
         run: .github/scripts/bench_ab.sh "$BASELINE" "$CANDIDATE" "$RUNNER_TEMP/ab"
@@ -149,7 +150,7 @@ jobs:
             echo "$marker"
             echo "## Benchmarks: what this PR changes"
             echo
-            echo "Base of the PR against the PR as merged (${HEAD_SHA:0:8}), measured back to back on the same runner. Counts are exact; times are from shared runners."
+            echo "Base of the PR against the PR as merged (${HEAD_SHA:0:8}), measured back to back on the same runner. Counts are exact; times are from shared runners, over 5 builds of each side with their functions in different orders, so that code that only moved does not read as faster or slower."
             echo
             for section in "$X86_64" "$AARCH64"; do
               if [ -n "$section" ]; then
