@@ -4,7 +4,7 @@
  "date": "2026-11-14T08:06:34-05:00",
  "hardware": {
   "cores": "4",
-  "cpu_model": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+  "cpu_model": "AMD EPYC 7763 64-Core Processor",
   "uname": "Linux runnervmccnms 7.0.0-1019-azure #20-Ubuntu SMP PREEMPT Mon Oct 19 22:41:16 UTC 2026 x86_64 GNU/Linux"
  },
  "results": [
@@ -186,137 +186,137 @@
   {
    "name": "isolated/ns per write/write(), 1 guard held throughout (2000 values held back)",
    "unit": "ns",
-   "value": 2776.36
+   "value": 2877.12
   },
   {
    "name": "isolated/ns per write/write(), 2 guards held throughout (2000 values held back)",
    "unit": "ns",
-   "value": 3376.45
+   "value": 3503.9
   },
   {
    "name": "isolated/ns per write/write(), 6 guards held throughout (2000 values held back)",
    "unit": "ns",
-   "value": 10790.98
+   "value": 8861.94
   },
   {
    "name": "isolated/ns per write/write(), no readers",
    "unit": "ns",
-   "value": 47.11
+   "value": 39.79
   },
   {
    "name": "isolated/ns per write/write_sync_into(), no readers",
    "unit": "ns",
-   "value": 37.73
+   "value": 22.79
   },
   {
    "name": "isolated/ns per write/write_sync_into() reusing boxes, no readers",
    "unit": "ns",
-   "value": 30.03
+   "value": 17.41
   },
   {
    "name": "isolated/ns per write/write_nosync() + try_sync() every 128, no readers",
    "unit": "ns",
-   "value": 39.01
+   "value": 28.3
   },
   {
    "name": "isolated/ns per read/R=1 plain, no writer",
    "unit": "ns",
-   "value": 8.07
+   "value": 2.32
   },
   {
    "name": "isolated/ns per read/R=1 cached, no writer",
    "unit": "ns",
-   "value": 0.61
+   "value": 0.65
   },
   {
    "name": "isolated/ns per read/R=1 plain, writer: write()",
    "unit": "ns",
-   "value": 54.7
+   "value": 46.33
   },
   {
    "name": "isolated/ns per write/write(), R=1 plain readers",
    "unit": "ns",
-   "value": 300.08
+   "value": 199.06
   },
   {
    "name": "isolated/ns per read/R=1 cached, writer: write()",
    "unit": "ns",
-   "value": 1.37
+   "value": 2.2
   },
   {
    "name": "isolated/ns per write/write(), R=1 cached readers",
    "unit": "ns",
-   "value": 321.51
+   "value": 205.42
   },
   {
    "name": "isolated/ns per write/write_sync_into(), R=1 plain readers",
    "unit": "ns",
-   "value": 270.41
+   "value": 193.62
   },
   {
    "name": "isolated/ns per write/write_sync_into() reusing boxes, R=1 plain readers",
    "unit": "ns",
-   "value": 260.26
+   "value": 164.97
   },
   {
    "name": "isolated/ns per read/R=1 plain, writer: write_nosync() + try_sync() every 128",
    "unit": "ns",
-   "value": 17.98
+   "value": 6.34
   },
   {
    "name": "isolated/ns per write/write_nosync() + try_sync() every 128, R=1 plain readers",
    "unit": "ns",
-   "value": 203.59
+   "value": 67.93
   },
   {
    "name": "isolated/ns per read/R=3 plain, no writer",
    "unit": "ns",
-   "value": 10.0
+   "value": 2.47
   },
   {
    "name": "isolated/ns per read/R=3 cached, no writer",
    "unit": "ns",
-   "value": 0.91
+   "value": 1.01
   },
   {
    "name": "isolated/ns per read/R=3 plain, writer: write()",
    "unit": "ns",
-   "value": 28.51
+   "value": 10.61
   },
   {
    "name": "isolated/ns per write/write(), R=3 plain readers",
    "unit": "ns",
-   "value": 406.77
+   "value": 330.02
   },
   {
    "name": "isolated/ns per read/R=3 cached, writer: write()",
    "unit": "ns",
-   "value": 2.44
+   "value": 2.31
   },
   {
    "name": "isolated/ns per write/write(), R=3 cached readers",
    "unit": "ns",
-   "value": 385.42
+   "value": 256.31
   },
   {
    "name": "isolated/ns per write/write_sync_into(), R=3 plain readers",
    "unit": "ns",
-   "value": 398.38
+   "value": 258.86
   },
   {
    "name": "isolated/ns per write/write_sync_into() reusing boxes, R=3 plain readers",
    "unit": "ns",
-   "value": 381.33
+   "value": 251.02
   },
   {
    "name": "isolated/ns per read/R=3 plain, writer: write_nosync() + try_sync() every 128",
    "unit": "ns",
-   "value": 25.56
+   "value": 8.48
   },
   {
    "name": "isolated/ns per write/write_nosync() + try_sync() every 128, R=3 plain readers",
    "unit": "ns",
-   "value": 213.73
+   "value": 137.3
   }
  ],
  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)"
