@@ -116,7 +116,35 @@ const DEAD: usize = usize::MAX;
 /// Writer for a slot. Can also read the value, and create more readers
 ///
 /// Only 1 of these per slot exists. If multiple writers are needed, wrap this
-/// in a mutex.
+/// in a mutex. The writers then take turns, and readers are not affected by that lock:
+///
+/// ```
+/// use std::sync::{Arc, Mutex};
+/// use std::thread;
+///
+/// let (w, mut r) = local_rcu::slot(0u64);
+/// let w = Arc::new(Mutex::new(w));
+///
+/// let threads: Vec<_> = (0..4)
+///     .map(|_| {
+///         let w = Arc::clone(&w);
+///         thread::spawn(move || {
+///             for _ in 0..100 {
+///                 // holding the lock across the read and the write makes the increment atomic
+///                 let mut w = w.lock().unwrap();
+///                 let next = *w.read() + 1;
+///                 w.write(Box::new(next));
+///             }
+///         })
+///     })
+///     .collect();
+///
+/// for t in threads {
+///     t.join().unwrap();
+/// }
+///
+/// assert_eq!(*r.read(), 400);
+/// ```
 pub struct Writer<T> {
     shared: Arc<Shared<T>>,
 }
