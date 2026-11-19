@@ -4,16 +4,55 @@
 optimizies reads and defers returning old values (ie: for dropping/freeing). It
 provides a single writer, multiple reader data structure.
 
-Readers don't block writers, slow readers just cause more memory usage (assuming
-a continuously updating writer, old values are preserved until there are no
-readers examining them).
+You can use `local-rcu` when you want to have some writer task share a value with
+one or many reader tasks. The sharing is done by replacing the entire old value with
+a new value, so it's generally most efficient when you can make a new value easily or
+updates are infrequent (in a relative sense).
 
-Readers outside a read section don't block collection of old values. Readers inside
+```
+fn main() {
+   let (mut writer, mut reader) = local_rcu::slot(Box::new(10));
+
+   writer.write(Box::new(5));
+
+   // wherever you want to read, other threads, etc
+   println!("{}", *reader.read());
+
+   // writer can produce readers, or do `reader.clone()`
+   let another_reader = writer.reader();
+
+   println!("{}", *another_reader.read());
+}
+```
+
+## General Characteristics
+
+Read operations are wait free.
+
+Reads do not block writes. Readers that keep using a value (iow: are inside a read section) cause more memory usage: old values are preserved until there are no readers examining them.
+
+Minimal additional old values that aren't being examined may be held off from collection (those that readers
+are switching between when a write occurs).
+
+Readers outside a read section don't block collection of any old values. Readers inside
 a read section may block collection of old values other than the one they are reading
 with low probability.
 
-Readers read a borrowed value (the Reader itself is refcounted, not the value being read). 
+Readers read a borrowed value (the Reader itself is refcounted, not the value being read).
+
 Writers provide an entire replacement value (as this is RCU-like).
+
+Write operations which do not perform collection (`write_nosync()`) may allocate memory (to track the previous uncollected value), but otherwise is a plain pointer write with Release ordering.
+
+## Why should I pick this library instead of another option in this space?
+
+- `local-rcu` has performance that is very good compared to other rcu-like cell libraries for Rust. See benchmarks of `local-rcu` against alternatives in [`rcu-bench`](https://codyps.github.io/rcu-bench).
+- `local-rcu` doesn't require writing any unsafe code to use the library.
+- `local-rcu` doesn't have a Copy or Clone requirement.
+- `local-rcu` doesn't rely on any arch/os specific code not abstracted by `std` and `core`.
+- `local-rcu` allows recycling values, not just dropping them.
+
+See comparisons of `local-rcu` against alternatives in [`COMPARISONS.md`](COMPARISONS.md).
 
 ## If I want behavior like X, what should I do?
 
@@ -47,16 +86,6 @@ The price: between reads it holds back the value it last saw (that one value
 only, like the `Arc` those caches keep). A reader that goes idle can call
 `CachedReader::release()` first to let go of it too (a plain `Reader` never
 holds anything back while idle).
-
-## Why should I pick this library?
-
-- `local-rcu` has performance that is very good compared to other rcu-like cell libraries for Rust. See benchmarks of `local-rcu` against alternatives in [`rcu-bench`](https://codyps.github.io/rcu-bench).
-- `local-rcu` doesn't require writing any unsafe code to use the library.
-- `local-rcu` doesn't have a Copy or Clone requirement.
-- `local-rcu` doesn't rely on any arch/os specific code not abstracted by `std` and `core`.
-- `local-rcu` allows recycling values, not just dropping them.
-
-See comparisons of `local-rcu` against alternatives in [`COMPARISONS.md`](COMPARISONS.md).
 
 ## High Level Internal flow
 
