@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1](https://github.com/codyps/local-rcu/compare/v1.2.0...v1.2.1) - 2026-11-21
+
+### Other
+
+- check relaxed fences/ordering fail, test more miri seeds
+- *(nix)* fix more
+- *(nix)* make x86_64-darwin work
+- bump trybuild from 1.0.122 to 1.0.125 ([#33](https://github.com/codyps/local-rcu/pull/33))
+- Enhance README with detailed usage and features
+- show Arc<Mutex<Writer>> for multiple writers ([#31](https://github.com/codyps/local-rcu/pull/31))
+
 ## [1.2.0](https://github.com/codyps/local-rcu/compare/v1.1.1...v1.2.0) - 2026-11-14
 
 ### Added
