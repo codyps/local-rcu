@@ -1,20 +1,25 @@
 {
   inputs = {
     nixpkgs.url = "nixpkgs/nixpkgs-unstable";
+    # nixpkgs-unstable (26.11+) dropped x86_64-darwin, so Intel Macs must stay
+    # on the last branch that still supports them.
+    nixpkgs-darwin-x86_64.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     flake-utils.url = "github:numtide/flake-utils";
     crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, flake-utils, crane, nixpkgs }:
+  outputs = { self, flake-utils, crane, nixpkgs, nixpkgs-darwin-x86_64 }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = ((import nixpkgs) {
+        pkgs = (import (
+          if system == "x86_64-darwin" then nixpkgs-darwin-x86_64 else nixpkgs
+        )) {
           inherit system;
-        });
+        };
         lib = pkgs.lib;
         stdenv = pkgs.stdenv;
 
-        craneLib = (crane.mkLib nixpkgs.legacyPackages.${system});
+        craneLib = (crane.mkLib pkgs);
 
         #src = craneLib.cleanCargoSource (craneLib.path ./.);
         src = let

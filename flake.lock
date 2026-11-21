@@ -47,11 +47,28 @@
         "type": "indirect"
       }
     },
+    "nixpkgs-darwin-x86_64": {
+      "locked": {
+        "lastModified": 1795147381,
+        "narHash": "sha256-8Zhru7g6o6N01kCIHIPXwt8gSp982cPzph/rXPVfzXc=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ca9c2429e2d01d6e75541ba92ef4e62faad696e2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-26.05-darwin",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "crane": "crane",
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "nixpkgs-darwin-x86_64": "nixpkgs-darwin-x86_64"
       }
     },
     "systems": {
