@@ -89,6 +89,48 @@ jobs:
       # interleaving model and miri's memory-model emulation check disjoint things
       # (loom cannot express store-buffer staleness; miri cannot model check).
       - run: cargo miri test --workspace -- --skip compile_fail
+      # 32-bit: a `usize` epoch of half the width, and other layouts
+      - name: 32-bit target
+        run: cargo miri test --workspace --target i686-unknown-linux-gnu -- --skip compile_fail
+  # The miri job tries one thread schedule per test. Each seed here is another one, with
+  # other choices of which (stale) value a load returns: this is what looks for the
+  # store-buffering outcome and for accesses that nothing orders before a free.
+  # A job of its own because it is the slow part (the seeds run in parallel, one per core).
+  miri-seeds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master@2026-10-16
+        with:
+          toolchain: nightly
+          components: miri
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Only the tests that use threads: the others do the same thing under every seed.
+      # Without `send_100_from_1_to_m`: it takes minutes per seed under miri, and what it
+      # does is covered by `reentry_never_observes_collected_value`.
+      - name: Seed sweep of the threaded tests
+        env:
+          MIRIFLAGS: -Zmiri-many-seeds=0..16 -Zmiri-strict-provenance
+        run: |
+          cargo miri test -p local-rcu --test a --test cached -- --skip send_100_from_1_to_m
+          cargo miri test -p local-rcu-left-right --test multi_thread
+  # Each ordering and fence the safety argument rests on is weakened in turn; a test has to
+  # fail every time (see mutants.sh). This tests the tests: without it, an ordering could be
+  # weakened by mistake and loom & miri above would still pass.
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master@2026-10-16
+        with:
+          toolchain: nightly
+          components: miri
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: ./mutants.sh
   with-cargo:
     runs-on: ubuntu-latest
     timeout-minutes: 15

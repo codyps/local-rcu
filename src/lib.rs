@@ -32,6 +32,62 @@ use std::{
 
 pub mod cached;
 
+/// The orderings and fences that the safety argument rests on, each in one named place.
+///
+/// The comments where these are used say why none of them can be weaker. That claim is
+/// tested: a build with `--cfg local_rcu_mutant="<name>"` weakens exactly one of them, and
+/// `mutants.sh` checks that a test then fails (under loom for the fences, under miri's data
+/// race detector for the rest). A mutant that no test catches means a test is missing, or
+/// that the ordering is stronger than it has to be.
+///
+/// Without that cfg (it is never set in a normal build) these are plain constants, and the
+/// code is the same as if the orderings were written out where they are used.
+mod ord {
+    use super::atomic::{self, Ordering};
+
+    /// The ordering `strong`, or `Relaxed` in the mutant build named `mutant`.
+    macro_rules! weaken {
+        ($mutant:literal, $strong:ident) => {
+            if cfg!(local_rcu_mutant = $mutant) {
+                Ordering::Relaxed
+            } else {
+                Ordering::$strong
+            }
+        };
+    }
+
+    /// `Reader::enter()`: the store that sets the flag in the reader's epoch.
+    pub(crate) const ENTER_STORE: Ordering = weaken!("enter_store_relaxed", Release);
+    /// `Reader::enter()`: the load of the value pointer.
+    pub(crate) const ACTIVE_LOAD: Ordering = weaken!("active_load_relaxed", Acquire);
+    /// `Reader::leave()`: the store that advances the reader's epoch.
+    pub(crate) const LEAVE_STORE: Ordering = weaken!("leave_store_relaxed", Release);
+    /// `Reader::drop()`: the store of `DEAD`.
+    pub(crate) const DROP_STORE: Ordering = weaken!("drop_store_relaxed", Release);
+    /// `Writer::publish()`: the store of the value pointer.
+    pub(crate) const PUBLISH_STORE: Ordering = weaken!("publish_store_relaxed", Release);
+    /// `Writer::track_retired()`: the loads of the reader epochs.
+    pub(crate) const SCAN_LOAD: Ordering = weaken!("scan_load_relaxed", Acquire);
+    /// `Writer::collect_prevs()`: the loads of the tracked reader epochs.
+    pub(crate) const COLLECT_LOAD: Ordering = weaken!("collect_load_relaxed", Acquire);
+
+    /// The fence in `Reader::enter()`, between the epoch store and the load of the value.
+    #[inline(always)]
+    pub(crate) fn reader_fence() {
+        if !cfg!(local_rcu_mutant = "no_reader_fence") {
+            atomic::fence(Ordering::SeqCst);
+        }
+    }
+
+    /// The fence in `Writer::track_retired()`, between publishing and the epoch scan.
+    #[inline(always)]
+    pub(crate) fn writer_fence() {
+        if !cfg!(local_rcu_mutant = "no_writer_fence") {
+            atomic::fence(Ordering::SeqCst);
+        }
+    }
+}
+
 /// Create a new SPMC slot containing an initial value `init_val`
 pub fn slot<T>(init_val: T) -> (Writer<T>, Reader<T>) {
     let w = Writer::new(Box::new(init_val));
@@ -548,7 +604,7 @@ impl<T> Writer<T> {
                 // loom's interleaving model, so loom can't catch this).
                 epochs
                     .get(*idx)
-                    .is_some_and(|e| e.epoch.load(atomic::Ordering::Acquire) == *prev)
+                    .is_some_and(|e| e.epoch.load(ord::COLLECT_LOAD) == *prev)
             });
 
             if tracked.is_empty() {
@@ -676,7 +732,7 @@ impl<T> Writer<T> {
         // before `track_retired()` has looked for such readers.
         self.shared
             .active
-            .store(Box::into_raw(val), atomic::Ordering::Release);
+            .store(Box::into_raw(val), ord::PUBLISH_STORE);
 
         // Note: `prev` stays a raw pointer here (see `Retired`): readers may still hold guards
         // dereferencing it.
@@ -701,7 +757,7 @@ impl<T> Writer<T> {
 
         for (idx, reader) in readers.slab.iter() {
             // `Acquire`: see the plain scan in `track_retired()`.
-            let v = reader.epoch.load(atomic::Ordering::Acquire);
+            let v = reader.epoch.load(ord::SCAN_LOAD);
             if v == DEAD {
                 state.saw_dead = true;
             } else if v & READER_FLAG != 0 {
@@ -798,7 +854,7 @@ impl<T> Writer<T> {
         // One fence serves every value in `unscanned`, however many `publish()` calls retired
         // them: the stores that replaced them are all sequenced before it, and all the argument
         // needs is that a section in the "Re-entry" case loads something newer than each.
-        atomic::fence(atomic::Ordering::SeqCst);
+        ord::writer_fence();
 
         // collect the readers that may still be reading the retired values, so we can free them
         // later: those in a read section, which may be using any of the values.
@@ -815,7 +871,7 @@ impl<T> Writer<T> {
                 // the `Release` epoch stores in `ReadGuard::drop`, `Reader::read()` (entry) and
                 // `Reader::drop`. The fence above makes sure a reader that might still load one
                 // of the values shows up here as in-section and gets tracked (see "In flight").
-                let v = reader.epoch.load(atomic::Ordering::Acquire);
+                let v = reader.epoch.load(ord::SCAN_LOAD);
                 if v == DEAD {
                     state.saw_dead = true;
                 } else if v & READER_FLAG != 0 {
@@ -940,9 +996,7 @@ impl<T> Reader<T> {
         // plain store from the same thread does not extend a release sequence, so a writer
         // that reads this value would not synchronize with that earlier store. (Accesses in
         // *this* section are covered by the store in `ReadGuard::drop`.)
-        self.epoch
-            .epoch
-            .store(v | READER_FLAG, atomic::Ordering::Release);
+        self.epoch.epoch.store(v | READER_FLAG, ord::ENTER_STORE);
 
         // Ensure the `epoch` store is visible in other threads before we read
         // `active` (so we don't free-and-reuse a value we're about to dereference).
@@ -955,7 +1009,7 @@ impl<T> Reader<T> {
         // - A `SeqCst` store or `SeqCst` RMW (`fetch_or`) instead of the fence fails under
         //   loom, which treats `SeqCst` accesses roughly as `AcqRel`. The fence pair is
         //   something both loom and the C++ fence rules (see `Writer::track_retired()`) can check.
-        atomic::fence(atomic::Ordering::SeqCst);
+        ord::reader_fence();
 
         // Pairs with the `Release` store in `Writer::publish()`, so we see every write the
         // writer made to the data reachable through `data`.
@@ -968,7 +1022,7 @@ impl<T> Reader<T> {
         // ensure that loads via it have a data dependency on other writes).
         // `Consume` isn't supported by current rust/loom though, so we use the
         // stronger `Acquire`.
-        self.shared.active.load(atomic::Ordering::Acquire)
+        self.shared.active.load(ord::ACTIVE_LOAD)
     }
 
     /// Tell the writer that the read section we are in holds `val` and nothing else, so that it
@@ -1027,7 +1081,7 @@ impl<T> Reader<T> {
         // value is still never reached.
         self.epoch
             .epoch
-            .store(v.wrapping_add(READER_FLAG), atomic::Ordering::Release);
+            .store(v.wrapping_add(READER_FLAG), ord::LEAVE_STORE);
         // NOTE: adding a fence(SeqCst) here speeds up loom significantly,
         // implying not having it opens up many more execution variants. This
         // implies:
@@ -1047,7 +1101,7 @@ impl<T> Drop for Reader<T> {
         //
         // Note: we don't need the lock for this: a dead-marked epoch is simply never tracked
         // again, and the slab entry keeps the epoch alive until the writer recycles it.
-        self.epoch.epoch.store(DEAD, atomic::Ordering::Release);
+        self.epoch.epoch.store(DEAD, ord::DROP_STORE);
     }
 }
 
