@@ -13,6 +13,8 @@ fn main() {
             "publish_store_relaxed",
             "scan_load_relaxed",
             "collect_load_relaxed",
+            "held_load_relaxed",
+            "no_hold_nothing",
         ]
         .map(|name| format!("\"{name}\""))
         .join(", ")
