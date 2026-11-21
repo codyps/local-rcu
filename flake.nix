@@ -11,11 +11,15 @@
   outputs = { self, flake-utils, crane, nixpkgs, nixpkgs-darwin-x86_64 }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = (import (
-          if system == "x86_64-darwin" then nixpkgs-darwin-x86_64 else nixpkgs
-        )) {
-          inherit system;
-        };
+        # x86_64-darwin: silence the 26.05 "last release to support" warning;
+        # staying pinned here is a deliberate choice, not an accident.
+        pkgs =
+          if system == "x86_64-darwin"
+          then import nixpkgs-darwin-x86_64 {
+            inherit system;
+            config.allowDeprecatedx86_64Darwin = true;
+          }
+          else import nixpkgs { inherit system; };
         lib = pkgs.lib;
         stdenv = pkgs.stdenv;
 
