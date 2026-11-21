@@ -4,7 +4,8 @@
 # the tests can tell when one is missing.
 #
 # Each mutant is a build with `--cfg local_rcu_mutant="<name>"`, which weakens one ordering
-# or leaves out one fence (see `ord` in src/lib.rs). For every mutant, the test named here
+# or leaves out one fence or step (see `ord` in src/lib.rs for the orderings and fences;
+# the step is in `Reader::hold_nothing()`). For every mutant, the test named here
 # has to fail, and for the right reason: a failed loom model, or undefined behavior found
 # by miri. A mutant that survives means the test no longer covers that ordering, or that
 # the ordering is stronger than it has to be.
@@ -35,6 +36,8 @@ mutants=(
 	"publish_store_relaxed miri a    reentry_never_observes_collected_value"
 	"scan_load_relaxed     miri a    reentry_never_observes_collected_value"
 	"collect_load_relaxed  miri a    reentry_never_observes_collected_value"
+	"held_load_relaxed     miri cached concurrent_readers_never_see_dropped_values"
+	"no_hold_nothing       miri cached concurrent_readers_never_see_dropped_values"
 )
 
 # mutant builds get a target directory of their own: they must not replace the normal ones

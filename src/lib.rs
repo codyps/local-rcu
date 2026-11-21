@@ -40,6 +40,15 @@ pub mod cached;
 /// race detector for the rest). A mutant that no test catches means a test is missing, or
 /// that the ordering is stronger than it has to be.
 ///
+/// One mutant leaves out a step rather than an ordering: `no_hold_nothing`, see
+/// `Reader::hold_nothing()`.
+///
+/// Not here: the two `Release` stores to [`ReaderState::held`]. No test fails when they are
+/// `Relaxed`, and the argument does not need them. A null there orders nothing the writer
+/// relies on (it then treats the reader as a plain one), and for a pointer the `SeqCst` fence
+/// earlier in the same `Reader::enter()` already orders every earlier read of the reader
+/// before the writer's `Acquire` load of it. They cost nothing, and stay.
+///
 /// Without that cfg (it is never set in a normal build) these are plain constants, and the
 /// code is the same as if the orderings were written out where they are used.
 mod ord {
@@ -70,6 +79,8 @@ mod ord {
     pub(crate) const SCAN_LOAD: Ordering = weaken!("scan_load_relaxed", Acquire);
     /// `Writer::collect_prevs()`: the loads of the tracked reader epochs.
     pub(crate) const COLLECT_LOAD: Ordering = weaken!("collect_load_relaxed", Acquire);
+    /// `Writer::track_holders()`: the load of what a reader holds.
+    pub(crate) const HELD_LOAD: Ordering = weaken!("held_load_relaxed", Acquire);
 
     /// The fence in `Reader::enter()`, between the epoch store and the load of the value.
     #[inline(always)]
@@ -780,7 +791,13 @@ impl<T> Writer<T> {
                 //
                 // In the last two cases, tracking the reader for `p` alone (with epoch `v`) is
                 // exactly right, or (third case) more than is needed.
-                let held = reader.held.load(atomic::Ordering::Acquire);
+                //
+                // `Acquire` matters in the third case. The values section `v` used can be
+                // freed straight away then, so its reads must happen-before this point, and
+                // the epoch load above does not provide that: it saw the *entry* of `v`.
+                // Seeing a pointer stored in a later section does, as the reader left `v`
+                // before it stored it.
+                let held = reader.held.load(ord::HELD_LOAD);
                 if held.is_null() {
                     remaining_readers.push((idx, v));
                 } else {
@@ -1044,6 +1061,11 @@ impl<T> Reader<T> {
     /// writer that sees a later epoch must not find what an earlier section held (see
     /// `Writer::track_retired()`).
     fn hold_nothing(&self) {
+        // The `no_hold_nothing` mutant build leaves this store out right here, to check that
+        // a test notices. (What mutants are for: see the docs of `ord`, and mutants.sh.)
+        if cfg!(local_rcu_mutant = "no_hold_nothing") {
+            return;
+        }
         self.epoch
             .held
             .store(std::ptr::null_mut(), atomic::Ordering::Release);
