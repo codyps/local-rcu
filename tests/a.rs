@@ -250,3 +250,48 @@ fn reentry_never_observes_collected_value() {
         *old = POISON;
     }
 }
+
+/// A reader that has been dropped is not waited for: the writer may hand back a value as soon
+/// as it sees that the reader is gone, even one the reader read a moment ago. The reader's
+/// reads have to be ordered before that, which is all its final epoch store is there for. The
+/// writer overwrites every value handed back to it, so under miri a missing order shows up as
+/// a data race with the reader's read.
+#[test]
+fn reader_drop_orders_reads_before_collection() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const POISON: usize = usize::MAX;
+    let rounds = if cfg!(miri) { 20 } else { 2_000 };
+
+    let (mut w, r) = local_rcu::slot(0usize);
+    let gone = std::sync::Arc::new(AtomicUsize::new(0));
+    let mut next = 1;
+
+    for round in 1..=rounds {
+        let mut r = r.clone();
+        let gone_w = gone.clone();
+        let t = thread::spawn(move || {
+            let v = *r.read();
+            assert_ne!(v, POISON, "read a collected value");
+            drop(r);
+            // `Relaxed` here and where it is loaded: this must not order anything itself, or
+            // it would hide what the test is looking for
+            gone_w.store(round, Ordering::Relaxed);
+        });
+
+        // Keep writing while the reader comes and goes, and once more after it is gone: the
+        // values it may have read are handed back before the thread is joined (which would
+        // order everything it did before us).
+        loop {
+            let reader_gone = gone.load(Ordering::Relaxed) == round;
+            for mut old in w.write(Box::new(next)) {
+                *old = POISON;
+            }
+            next += 1;
+            if reader_gone {
+                break;
+            }
+        }
+        t.join().unwrap();
+    }
+}
