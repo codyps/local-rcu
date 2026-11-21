@@ -89,7 +89,11 @@ jobs:
       # interleaving model and miri's memory-model emulation check disjoint things
       # (loom cannot express store-buffer staleness; miri cannot model check).
       - run: cargo miri test --workspace -- --skip compile_fail
-      # 32-bit: a `usize` epoch of half the width, and other layouts
+      # 32-bit: a `usize` epoch of half the width, and other layouts.
+      # miri builds its own std for the target, but a dev-dependency (criterion, through
+      # `alloca`) compiles C in its build script, and that needs the 32-bit libc headers.
+      - name: Install a 32-bit C toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
       - name: 32-bit target
         run: cargo miri test --workspace --target i686-unknown-linux-gnu -- --skip compile_fail
   # The miri job tries one thread schedule per test. Each seed here is another one, with
