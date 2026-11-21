@@ -1061,7 +1061,8 @@ impl<T> Reader<T> {
     /// writer that sees a later epoch must not find what an earlier section held (see
     /// `Writer::track_retired()`).
     fn hold_nothing(&self) {
-        // (a mutant build leaves this out, to check that a test notices: see `ord`)
+        // The `no_hold_nothing` mutant build leaves this store out right here, to check that
+        // a test notices. (What mutants are for: see the docs of `ord`, and mutants.sh.)
         if cfg!(local_rcu_mutant = "no_hold_nothing") {
             return;
         }
