@@ -119,7 +119,7 @@ impl<T> CachedReader<T> {
     pub fn read(&mut self) -> &T {
         if !self.cached.is_null() {
             // `Relaxed`: this pointer is only compared, never dereferenced. If it equals
-            // `cached`, we return the pointer we loaded with `Acquire` when entering the
+            // `cached`, we return the pointer we loaded (as `Reader::enter()` does) when entering the
             // section. The writer's store to `active` cannot be missed for ever either: a
             // store that happens-before this call must be observed by this load.
             //
