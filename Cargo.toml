@@ -48,4 +48,4 @@ debug = true
 # builds in this repository only: a crate that depends on local-rcu gets the
 # loom it asks for.
 [patch.crates-io]
-loom = { git = "https://github.com/codyps/loom", branch = "load-consume" }
+loom = { git = "https://github.com/codyps/loom", branch = "master" }
