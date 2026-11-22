@@ -362,8 +362,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 [[package]]
 name = "loom"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1611ddbf89dc6ae42cfbd51fc207836140130257646eab8d6d2fb16577db2d2"
+source = "git+https://github.com/codyps/loom?branch=load-consume#e0eccb6ee0e8fa47ea51fed9517e94b9140ce6f2"
 dependencies = [
  "cfg-if",
  "generator",

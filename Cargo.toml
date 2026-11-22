@@ -41,3 +41,11 @@ harness = false
 [profile.release]
 debug = true
 
+
+# The loom tests check the reader's load of the value as a consume load
+# (`--cfg local_rcu_loom_consume`, see `ord::active_load()` in src/lib.rs).
+# Only this fork of loom has `AtomicPtr::load_consume()`. This applies to
+# builds in this repository only: a crate that depends on local-rcu gets the
+# loom it asks for.
+[patch.crates-io]
+loom = { git = "https://github.com/codyps/loom", branch = "load-consume" }

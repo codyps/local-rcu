@@ -58,7 +58,7 @@ for entry in "${mutants[@]}"; do
 	cfg="--cfg local_rcu_mutant=\"$name\""
 	case $tool in
 	loom)
-		RUSTFLAGS="--cfg loom $cfg" \
+		RUSTFLAGS="--cfg loom --cfg local_rcu_loom_consume $cfg" \
 			cargo test --release --test "$bin" -- --exact "$test" >"$log" 2>&1
 		status=$?
 		caught="test result: FAILED"

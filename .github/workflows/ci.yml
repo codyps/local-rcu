@@ -67,6 +67,14 @@ jobs:
       - name: Run tests
         run: nix develop --command cargo test --workspace --all-targets
       - name: Run loom tests
+        # The loom we build against (see `[patch.crates-io]` in Cargo.toml)
+        # explores far more executions than the one on crates.io, and the
+        # two largest tests (loom_send_from_1_to_1, loom_send_100_from_1_to_m)
+        # do not finish with it. Each test stops after this many seconds and
+        # passes if nothing failed until then; the others finish well before.
+        env:
+          LOOM_MAX_DURATION: 600
+          LOOM_WORKERS: 2
         run: nix develop --command ./loom.sh -- loom
       - name: Run examples
         run: |
