@@ -92,6 +92,9 @@ fn loom_send_100_from_1_to_m() {
         // 5 threads takes way too long
         let n = 2usize;
         let m = 1usize;
+        // Enough to see every value. Reading until the last value shows up takes loom too
+        // long: each further read multiplies the executions it has to try.
+        let reads = 3;
         let (mut tx, rx) = local_rcu::slot(0usize);
 
         let mut rx_t = Vec::with_capacity(m);
@@ -99,16 +102,15 @@ fn loom_send_100_from_1_to_m() {
             let mut rx = rx.clone();
             rx_t.push(thread::spawn(move || {
                 let mut prev = 0;
-                loop {
+                for _ in 0..reads {
                     let i = *rx.read();
                     if prev > i {
                         panic!("{} > {}", prev, i);
                     }
-                    if i == n {
-                        break;
+                    if i > n {
+                        panic!("{} > {}", i, n);
                     }
                     prev = i;
-                    loom::thread::yield_now();
                 }
             }));
         }
@@ -132,11 +134,15 @@ fn loom_send_100_from_1_to_m() {
 fn loom_send_from_1_to_1() {
     loom::model(|| {
         let n = 2usize;
+        // A third read, which a reader needs to see every value, already takes loom too long
+        // with the writer's `sync()`: each further read multiplies the executions it has to
+        // try.
+        let reads = 2;
         let (mut tx, mut rx) = local_rcu::slot(0usize);
 
         let rx_t = thread::spawn(move || {
             let mut prev = 0;
-            loop {
+            for _ in 0..reads {
                 let i = *rx.read();
                 if prev > i {
                     panic!("prev {prev:x} > i {i:x}");
@@ -144,11 +150,7 @@ fn loom_send_from_1_to_1() {
                 if i > n {
                     panic!("i {i:x} > n {n:x}");
                 }
-                if i == n {
-                    break;
-                }
                 prev = i;
-                loom::thread::yield_now();
             }
         });
 

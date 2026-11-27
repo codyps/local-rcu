@@ -8,8 +8,8 @@
 //! fences.
 //!
 //! - Reading is wait free. Each read section does a `Relaxed` load and two `Release` stores
-//!   of the reader's own (uncontended) epoch, one `SeqCst` fence, and one `Acquire` load of
-//!   the shared value pointer.
+//!   of the reader's own (uncontended) epoch, one `SeqCst` fence, and one load of the shared
+//!   value pointer (`Acquire`, or `Relaxed` on Arm: all it needs is a consume load).
 //! - Writing aquires an internal mutex to scan for old values to retire. Using
 //!   `write_nosync()` (which does not collect old values) is wait free: one store of the value
 //!   pointer, without looking at any reader. `try_sync()` then collects in batches.
@@ -67,8 +67,6 @@ mod ord {
 
     /// `Reader::enter()`: the store that sets the flag in the reader's epoch.
     pub(crate) const ENTER_STORE: Ordering = weaken!("enter_store_relaxed", Release);
-    /// `Reader::enter()`: the load of the value pointer.
-    pub(crate) const ACTIVE_LOAD: Ordering = weaken!("active_load_relaxed", Acquire);
     /// `Reader::leave()`: the store that advances the reader's epoch.
     pub(crate) const LEAVE_STORE: Ordering = weaken!("leave_store_relaxed", Release);
     /// `Reader::drop()`: the store of `DEAD`.
@@ -81,6 +79,59 @@ mod ord {
     pub(crate) const COLLECT_LOAD: Ordering = weaken!("collect_load_relaxed", Acquire);
     /// `Writer::track_holders()`: the load of what a reader holds.
     pub(crate) const HELD_LOAD: Ordering = weaken!("held_load_relaxed", Acquire);
+
+    /// `Reader::enter()`: the load of the value pointer.
+    ///
+    /// All this load has to order is the reader's use of the value after the writer's
+    /// initialization of it: what C++ calls `memory_order_consume`. Rust has no such
+    /// ordering, so this is one of three things (as `crossbeam_utils::atomic::AtomicConsume`):
+    ///
+    /// - On Arm, a `Relaxed` load. The processor orders a load through a pointer after the
+    ///   load of the pointer by itself, and `Acquire` costs an `ldar` instead of an `ldr`
+    ///   there. The language does not promise this: by its rules, reading the value after a
+    ///   `Relaxed` load is a data race. The `compiler_fence` keeps the compiler from moving
+    ///   anything across the load; that it does not break the dependency (by guessing the
+    ///   pointer, say) is an assumption.
+    /// - Under loom with `--cfg local_rcu_loom_consume`, `load_consume()`, which checks that
+    ///   we get by with that: the load orders nothing but accesses to the value. Only the
+    ///   loom fork at <https://github.com/codyps/loom> has that method, so it is not used
+    ///   for `--cfg loom` alone: a crate that depends on this one and runs its own loom
+    ///   tests builds us against the loom it gets from crates.io.
+    /// - Elsewhere (under miri, which holds us to the language's rules, and under any other
+    ///   loom), `Acquire`. On x86 it costs the same as `Relaxed`.
+    ///
+    /// The `active_load_relaxed` mutant is for the last case: miri has to notice.
+    #[inline(always)]
+    pub(crate) fn active_load<T>(active: &atomic::AtomicPtr<T>) -> *mut T {
+        #[cfg(all(loom, local_rcu_loom_consume))]
+        {
+            if cfg!(local_rcu_mutant = "active_load_relaxed") {
+                active.load(Ordering::Relaxed)
+            } else {
+                active.load_consume()
+            }
+        }
+        #[cfg(all(
+            not(loom),
+            not(miri),
+            any(target_arch = "arm", target_arch = "aarch64")
+        ))]
+        {
+            let val = active.load(Ordering::Relaxed);
+            atomic::compiler_fence(Ordering::SeqCst);
+            val
+        }
+        #[cfg(any(
+            all(loom, not(local_rcu_loom_consume)),
+            all(
+                not(loom),
+                any(miri, not(any(target_arch = "arm", target_arch = "aarch64")))
+            )
+        ))]
+        {
+            active.load(weaken!("active_load_relaxed", Acquire))
+        }
+    }
 
     /// The fence in `Reader::enter()`, between the epoch store and the load of the value.
     #[inline(always)]
@@ -1035,11 +1086,9 @@ impl<T> Reader<T> {
         // while we hold the guard comes from the fence above, not from this load's ordering.
         // See "In flight" and "Re-entry" in `Writer::track_retired()`.
         //
-        // Note: `Consume` is good enough for this operation (ie: wrt `active` we only need to
-        // ensure that loads via it have a data dependency on other writes).
-        // `Consume` isn't supported by current rust/loom though, so we use the
-        // stronger `Acquire`.
-        self.shared.active.load(ord::ACTIVE_LOAD)
+        // So the only thing this load orders is our use of the value after its
+        // initialization, and a consume load is enough: see `ord::active_load()`.
+        ord::active_load(&self.shared.active)
     }
 
     /// Tell the writer that the read section we are in holds `val` and nothing else, so that it

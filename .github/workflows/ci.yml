@@ -67,6 +67,11 @@ jobs:
       - name: Run tests
         run: nix develop --command cargo test --workspace --all-targets
       - name: Run loom tests
+        # The loom we build against (see `[patch.crates-io]` in Cargo.toml)
+        # explores far more executions than the one on crates.io, so each
+        # test explores them with two workers.
+        env:
+          LOOM_WORKERS: 2
         run: nix develop --command ./loom.sh -- loom
       - name: Run examples
         run: |
