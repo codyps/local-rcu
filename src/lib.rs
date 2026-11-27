@@ -9,7 +9,8 @@
 //!
 //! - Reading is wait free. Each read section does a `Relaxed` load and two `Release` stores
 //!   of the reader's own (uncontended) epoch, one `SeqCst` fence, and one load of the shared
-//!   value pointer (`Acquire`, or `Relaxed` on Arm: all it needs is a consume load).
+//!   value pointer (`Acquire`, or on Arm a `Relaxed` load followed by a `compiler_fence`:
+//!   all it needs is a consume load).
 //! - Writing aquires an internal mutex to scan for old values to retire. Using
 //!   `write_nosync()` (which does not collect old values) is wait free: one store of the value
 //!   pointer, without looking at any reader. `try_sync()` then collects in batches.
