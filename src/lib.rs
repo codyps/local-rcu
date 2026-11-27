@@ -9,11 +9,12 @@
 //!
 //! - Reading is wait free. Each read section does a `Relaxed` load and two `Release` stores
 //!   of the reader's own (uncontended) epoch, one `SeqCst` fence, and one load of the shared
-//!   value pointer (`Acquire`, or `Relaxed` on Arm: all it needs is a consume load).
-//! - Writing aquires an internal mutex to scan for old values to retire. Using
+//!   value pointer (`Acquire`, or on Arm a `Relaxed` load followed by a `compiler_fence`:
+//!   all it needs is a consume load).
+//! - Writing acquires an internal mutex to scan for old values to retire. Using
 //!   `write_nosync()` (which does not collect old values) is wait free: one store of the value
 //!   pointer, without looking at any reader. `try_sync()` then collects in batches.
-//! - Creating additional readers aquires an internal mutex & clones some `Arc`s.
+//! - Creating additional readers acquires an internal mutex & clones some `Arc`s.
 //! - Returning previously written values is deferred. When using `write()`, old
 //!   values are automatically examined to determine if they may still be in use
 //!   by a reader. If they are definitely not in use by a reader, the old values
@@ -581,7 +582,7 @@ impl<T> Writer<T> {
     /// }
     /// ```
     pub fn write_sync_into(&mut self, val: Box<T>, old: &mut Vec<Box<T>>) {
-        // Aquire the lock once for the whole operation. Scanning for old values, publishing, and
+        // Acquire the lock once for the whole operation. Scanning for old values, publishing, and
         // scanning for readers of the value we're replacing.
         let mut epochs = self.shared.epochs.lock().unwrap();
 
@@ -619,7 +620,7 @@ impl<T> Writer<T> {
 
     /// Check if we can release previous values and return them
     ///
-    /// Does not aquire any locks except the epoch slab lock. Returns after a single scan.
+    /// Does not acquire any locks except the epoch slab lock. Returns after a single scan.
     ///
     /// Values replaced by [`Writer::write_nosync()`] since the last scan are looked at here for
     /// the first time. Those that a reader may still be using come back from a later call, once

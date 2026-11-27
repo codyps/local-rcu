@@ -92,8 +92,10 @@ fn loom_send_100_from_1_to_m() {
         // 5 threads takes way too long
         let n = 2usize;
         let m = 1usize;
-        // Enough to see every value. Reading until the last value shows up takes loom too
-        // long: each further read multiplies the executions it has to try.
+        // Enough reads that some executions see every value, though in others the reader is
+        // done before the writer publishes them all: this checks the order of what the reader
+        // sees, not that it sees the last value. Reading until the last value shows up takes
+        // loom too long: each further read multiplies the executions it has to try.
         let reads = 3;
         let (mut tx, rx) = local_rcu::slot(0usize);
 
@@ -134,9 +136,10 @@ fn loom_send_100_from_1_to_m() {
 fn loom_send_from_1_to_1() {
     loom::model(|| {
         let n = 2usize;
-        // A third read, which a reader needs to see every value, already takes loom too long
-        // with the writer's `sync()`: each further read multiplies the executions it has to
-        // try.
+        // The reader may be done before the writer publishes every value: this checks the
+        // order of what the reader sees, not that it sees the last value. A third read, which
+        // a reader needs to see every value, already takes loom too long with the writer's
+        // `sync()`: each further read multiplies the executions it has to try.
         let reads = 2;
         let (mut tx, mut rx) = local_rcu::slot(0usize);
 
