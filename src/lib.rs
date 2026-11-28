@@ -417,7 +417,8 @@ struct WriterState<T> {
     holders: Vec<(usize, usize, *mut T)>,
 
     /// Scratch space for `Writer::scan()`: the readers it found in a read section (slab index,
-    /// epoch), by slab index. Only meaningful between a scan and the end of that call.
+    /// epoch), by slab index. Only meaningful between a scan and the end of that call, which
+    /// may hand the `Vec` itself to a new batch (see `Writer::track_retired()`).
     in_section: Vec<TrackedReader>,
 
     /// Scratch space for `Writer::scan_collect_track()`, by slab index: the epoch the scan saw
@@ -660,7 +661,11 @@ impl<T> Writer<T> {
             // Nothing new to track, so no fence and no full scan: only the readers tracked
             // for the waiting batches are looked at.
             let slab = &epochs.slab;
-            self.collect_prevs(
+            let state = self.state_mut();
+            Self::collect_prevs(
+                &mut state.prevs,
+                &mut state.pool,
+                &mut state.val_pool,
                 |idx, prev| {
                     // Acquire pairs with the `Release` epoch stores in `ReadGuard::drop`,
                     // `Reader::read()` (entry) and `Reader::drop`. Without it, the reader's
@@ -686,27 +691,14 @@ impl<T> Writer<T> {
     /// scan are for nothing).
     fn scan_collect_track(&self, readers: &Readers, out: &mut Vec<Box<T>>) {
         self.scan(&readers.slab);
-        let state = self.state_mut();
-        if state.in_section.is_empty() {
-            // The usual case: no reader is in a read section, so every tracked reader has left
-            // the section it was tracked in (see below), and nothing needs tracking.
-            self.collect_prevs(|_, _| false, out);
-            self.track_retired(readers, &[], out);
-            return;
-        }
-        let in_section = std::mem::take(&mut state.in_section);
-        let mut scanned_epoch = std::mem::take(&mut state.scanned_epoch);
-        // A batch can wait through many writes (a guard held for a long time), and each write
-        // asks about every reader tracked for every waiting batch: answer from a table by slab
-        // index, as cheap as looking at the epoch itself.
-        if let Some(&(last, _)) = in_section.last() {
-            if scanned_epoch.len() <= last {
-                scanned_epoch.resize(last + 1, 0);
-            }
-        }
-        for &(idx, v) in &in_section {
-            scanned_epoch[idx] = v;
-        }
+        let WriterState {
+            prevs,
+            pool,
+            val_pool,
+            in_section,
+            scanned_epoch,
+            ..
+        } = self.state_mut();
         // An epoch from the scan is as good for collecting as one loaded just for that: it is
         // an `Acquire` load of the same epoch, and only later than one `collect_prevs()` could
         // have made before the scan. A tracked reader is tracked with an epoch in a read
@@ -715,17 +707,34 @@ impl<T> Writer<T> {
         // in, and (tracked after an earlier fence) cannot load any of the batch's values
         // again. That `publish()` already ran makes no difference: the batches waiting here
         // hold none of the values it retired.
-        self.collect_prevs(
-            |idx, prev| scanned_epoch.get(idx).is_some_and(|&v| v == prev),
-            out,
-        );
-        self.track_retired(readers, &in_section, out);
-        for &(idx, _) in &in_section {
-            scanned_epoch[idx] = 0;
+        if in_section.is_empty() {
+            // The usual case: no reader is in a read section, so every tracked reader has
+            // moved on.
+            Self::collect_prevs(prevs, pool, val_pool, |_, _| false, out);
+        } else if !prevs.is_empty() {
+            // A batch can wait through many writes (a guard held for a long time), and each
+            // write asks about every reader tracked for every waiting batch: answer from a
+            // table by slab index, as cheap as looking at the epoch itself.
+            if let Some(&(last, _)) = in_section.last() {
+                if scanned_epoch.len() <= last {
+                    scanned_epoch.resize(last + 1, 0);
+                }
+            }
+            for &(idx, v) in in_section.iter() {
+                scanned_epoch[idx] = v;
+            }
+            Self::collect_prevs(
+                prevs,
+                pool,
+                val_pool,
+                |idx, prev| scanned_epoch.get(idx).is_some_and(|&v| v == prev),
+                out,
+            );
+            for &(idx, _) in in_section.iter() {
+                scanned_epoch[idx] = 0;
+            }
         }
-        let state = self.state_mut();
-        state.in_section = in_section;
-        state.scanned_epoch = scanned_epoch;
+        self.track_retired(readers, out);
     }
 
     /// Scan `prevs` for batches whose readers have all moved on, collect their values into `out`.
@@ -733,22 +742,30 @@ impl<T> Writer<T> {
     /// `still_in(idx, epoch)` says whether the reader at slab index `idx` is still in the read
     /// section with `epoch`, from an `Acquire` load of its epoch (see the callers).
     ///
+    /// Takes the fields of `WriterState` it uses rather than all of it, so that `still_in` can
+    /// borrow the others.
+    ///
     /// Requires `epochs` to be locked.
-    fn collect_prevs(&self, still_in: impl Fn(usize, usize) -> bool, out: &mut Vec<Box<T>>) {
+    fn collect_prevs(
+        prevs: &mut Vec<Retired<T>>,
+        pool: &mut Vec<Vec<TrackedReader>>,
+        val_pool: &mut Vec<Vec<*mut T>>,
+        still_in: impl Fn(usize, usize) -> bool,
+        out: &mut Vec<Box<T>>,
+    ) {
         // We need to move the values out of `prevs` and into `out`. `extract_if` would work.
         // `retain_mut` doesn't unless we play some unsafe games with pointers in `prev`.
         //
         // FIXME: switch to `extract_if` once it's stable.
 
-        let state = self.state_mut();
         let mut i = 0;
-        while i < state.prevs.len() {
-            let tracked = &mut state.prevs[i].tracked;
+        while i < prevs.len() {
+            let tracked = &mut prevs[i].tracked;
             // a reader is still in the section it was tracked in while its epoch is unchanged
             tracked.retain(|(idx, prev)| still_in(*idx, *prev));
 
             if tracked.is_empty() {
-                let Retired { vals, tracked } = state.prevs.remove(i);
+                let Retired { vals, tracked } = prevs.remove(i);
                 // SAFETY: every reader that could have been dereferencing one of `vals` was
                 // tracked by `track_retired()`, and `tracked` being empty means each has been
                 // observed to leave the read section it was tracked in: the `Acquire` load behind
@@ -765,11 +782,11 @@ impl<T> Writer<T> {
                     RetiredVals::One(val) => out.push(unsafe { Box::from_raw(val) }),
                     RetiredVals::Many(mut vals) => {
                         out.extend(vals.drain(..).map(|val| unsafe { Box::from_raw(val) }));
-                        state.val_pool.push(vals);
+                        val_pool.push(vals);
                     }
                 }
                 // recycle the allocation, if the batch had one
-                tracked.recycle(&mut state.pool);
+                tracked.recycle(pool);
             } else {
                 i += 1;
             }
@@ -890,13 +907,12 @@ impl<T> Writer<T> {
     fn track_holders(
         state: &mut WriterState<T>,
         readers: &Readers,
-        in_section: &[TrackedReader],
         remaining_readers: &mut Vec<TrackedReader>,
     ) {
         // in a read section, and have said which single value they hold
         let mut holders = std::mem::take(&mut state.holders);
 
-        for &(idx, v) in in_section {
+        for &(idx, v) in &state.in_section {
             // `v` is from the `Acquire` load in `scan()`, and the load of `held` below comes
             // after it.
             let reader = &readers.slab[idx];
@@ -1020,16 +1036,12 @@ impl<T> Writer<T> {
     }
 
     /// Find the readers that may still be using the values retired before the last `scan()`,
-    /// from the readers it found in a read section (`in_section`), and track them as one batch.
+    /// from the readers it found in a read section (`WriterState::in_section`), and track them
+    /// as one batch.
     /// If there are none, the values go straight to `out`.
     ///
     /// Requires `epochs` to be locked.
-    fn track_retired(
-        &self,
-        readers: &Readers,
-        in_section: &[TrackedReader],
-        out: &mut Vec<Box<T>>,
-    ) {
+    fn track_retired(&self, readers: &Readers, out: &mut Vec<Box<T>>) {
         let state = self.state_mut();
         if state.unscanned.is_empty() {
             return;
@@ -1037,16 +1049,20 @@ impl<T> Writer<T> {
 
         // collect the readers that may still be reading the retired values, so we can free them
         // later: those in a read section, which may be using any of the values.
-        let mut remaining_readers = state.pool.pop().unwrap_or_default();
-
+        //
         // Only a `CachedReader` says which value it holds. Without any, nobody has, and the
         // scan is the plain one: no look at `held`, nothing to sort out afterwards. (The count
-        // cannot change under us: creating a `CachedReader` needs the lock we hold.)
-        if readers.cached == 0 {
-            remaining_readers.extend_from_slice(in_section);
+        // cannot change under us: creating a `CachedReader` needs the lock we hold.) Then the
+        // scan's list is the one to track, as it is: it moves to the batch, and the next scan
+        // fills a list from the pool.
+        let mut remaining_readers = if readers.cached == 0 {
+            let empty = state.pool.pop().unwrap_or_default();
+            std::mem::replace(&mut state.in_section, empty)
         } else {
-            Self::track_holders(state, readers, in_section, &mut remaining_readers);
-        }
+            let mut remaining_readers = state.pool.pop().unwrap_or_default();
+            Self::track_holders(state, readers, &mut remaining_readers);
+            remaining_readers
+        };
 
         if state.unscanned.is_empty() {
             // every value went into a batch of its own above
