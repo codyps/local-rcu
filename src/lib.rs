@@ -687,6 +687,13 @@ impl<T> Writer<T> {
     fn scan_collect_track(&self, readers: &Readers, out: &mut Vec<Box<T>>) {
         self.scan(&readers.slab);
         let state = self.state_mut();
+        if state.in_section.is_empty() {
+            // The usual case: no reader is in a read section, so every tracked reader has left
+            // the section it was tracked in (see below), and nothing needs tracking.
+            self.collect_prevs(|_, _| false, out);
+            self.track_retired(readers, &[], out);
+            return;
+        }
         let in_section = std::mem::take(&mut state.in_section);
         let mut scanned_epoch = std::mem::take(&mut state.scanned_epoch);
         // A batch can wait through many writes (a guard held for a long time), and each write
