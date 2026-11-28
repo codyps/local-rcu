@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1](https://github.com/codyps/local-rcu/compare/v1.2.0...v1.2.1) - 2026-11-28
+
+### Other
+
+- ask rcu-bench to rerun its benchmarks on each push to main
+- correct notes left from the consume load, pin the loom fork ([#38](https://github.com/codyps/local-rcu/pull/38))
+- load the value pointer with a consume load ([#36](https://github.com/codyps/local-rcu/pull/36))
+- bump actions/create-github-app-token from 3.3.0 to 3.4.0 ([#37](https://github.com/codyps/local-rcu/pull/37))
+- mutants for what a CachedReader tells the writer it holds ([#35](https://github.com/codyps/local-rcu/pull/35))
+- check relaxed fences/ordering fail, test more miri seeds
+- *(nix)* fix more
+- *(nix)* make x86_64-darwin work
+- bump trybuild from 1.0.122 to 1.0.125 ([#33](https://github.com/codyps/local-rcu/pull/33))
+- Enhance README with detailed usage and features
+- show Arc<Mutex<Writer>> for multiple writers ([#31](https://github.com/codyps/local-rcu/pull/31))
+
 ## [1.2.0](https://github.com/codyps/local-rcu/compare/v1.1.1...v1.2.0) - 2026-11-14
 
 ### Added
