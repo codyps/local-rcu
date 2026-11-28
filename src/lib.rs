@@ -416,6 +416,18 @@ struct WriterState<T> {
     /// read section that have said which value they hold (slab index, epoch, value).
     holders: Vec<(usize, usize, *mut T)>,
 
+    /// Scratch space for `Writer::scan()`: the readers it found in a read section (slab index,
+    /// epoch), by slab index. Only meaningful between a scan and the end of that call, which
+    /// may hand the `Vec` itself to a new batch (see `Writer::track_retired()`).
+    in_section: Vec<TrackedReader>,
+
+    /// Scratch space for `Writer::scan_collect_track()`, by slab index: the epoch the scan saw
+    /// for each reader in `in_section`, and 0 everywhere else (0 has no `READER_FLAG`, so it
+    /// is never a tracked epoch). Only the entries of `in_section` are ever set, and they are
+    /// put back to 0 before that call returns, so keeping it costs nothing for idle readers.
+    /// Its length is the highest slab index found in a section so far, plus one.
+    scanned_epoch: Vec<usize>,
+
     /// Set when a `DEAD` epoch has been observed and the epoch slab needs a sweep to recycle
     /// dropped readers.
     saw_dead: bool,
@@ -530,6 +542,8 @@ impl<T> Writer<T> {
                 prevs: Vec::new(),
                 val_pool: Vec::new(),
                 holders: Vec::new(),
+                in_section: Vec::new(),
+                scanned_epoch: Vec::new(),
                 pool: Vec::new(),
                 saw_dead: false,
             }),
@@ -586,12 +600,14 @@ impl<T> Writer<T> {
         // scanning for readers of the value we're replacing.
         let mut epochs = self.shared.epochs.lock().unwrap();
 
-        // Old values first, then the scan for the new one: the readers tracked for the value
-        // we are about to replace have only just been looked at, there is no point in reading
-        // their epochs a second time straight away.
-        self.collect_prevs(&epochs.slab, old);
+        // Publish first, then look at each reader's epoch once, for both jobs: collecting the
+        // old values whose readers have moved on, and tracking the readers of the one we just
+        // replaced. Each look takes the reader's cache line away from it, and the reader then
+        // waits for it in the `SeqCst` fence of its next `Reader::read()`. Looking twice per
+        // write (once to collect, once to track) made a reader beside a busy writer wait for
+        // its epoch on nearly every read.
         self.publish(val);
-        self.track_retired(&epochs, old);
+        self.scan_collect_track(&epochs, old);
         Self::sweep_dead(self.state_mut(), &mut epochs.slab);
     }
 
@@ -641,41 +657,119 @@ impl<T> Writer<T> {
     /// [`Writer::write_sync_into()`].
     pub fn try_sync_into(&mut self, old: &mut Vec<Box<T>>) {
         let mut epochs = self.shared.epochs.lock().unwrap();
-        self.collect_prevs(&epochs.slab, old);
-        self.track_retired(&epochs, old);
+        if self.state().unscanned.is_empty() {
+            // Nothing new to track, so no fence and no full scan: only the readers tracked
+            // for the waiting batches are looked at.
+            let slab = &epochs.slab;
+            let state = self.state_mut();
+            Self::collect_prevs(
+                &mut state.prevs,
+                &mut state.pool,
+                &mut state.val_pool,
+                |idx, prev| {
+                    // Acquire pairs with the `Release` epoch stores in `ReadGuard::drop`,
+                    // `Reader::read()` (entry) and `Reader::drop`. Without it, the reader's
+                    // loads from the old value are not ordered before the free, which would be
+                    // a data race on the freed memory (allowed by the memory model on weakly
+                    // ordered targets; not expressible by loom's interleaving model, so loom
+                    // can't catch this).
+                    slab.get(idx)
+                        .is_some_and(|e| e.epoch.load(ord::COLLECT_LOAD) == prev)
+                },
+                old,
+            );
+        } else {
+            self.scan_collect_track(&epochs, old);
+        }
         Self::sweep_dead(self.state_mut(), &mut epochs.slab);
+    }
+
+    /// Track the readers of the values retired since the last scan, and collect the waiting
+    /// batches whose readers have moved on, with one look at each reader's epoch for both.
+    ///
+    /// Requires `epochs` to be locked, and `unscanned` not to be empty (or the fence and the
+    /// scan are for nothing).
+    fn scan_collect_track(&self, readers: &Readers, out: &mut Vec<Box<T>>) {
+        self.scan(&readers.slab);
+        let WriterState {
+            prevs,
+            pool,
+            val_pool,
+            in_section,
+            scanned_epoch,
+            ..
+        } = self.state_mut();
+        // An epoch from the scan is as good for collecting as one loaded just for that: it is
+        // an `Acquire` load of the same epoch, and only later than one `collect_prevs()` could
+        // have made before the scan. A tracked reader is tracked with an epoch in a read
+        // section, so it is still in that section exactly when the scan found it in a section
+        // with that same epoch. One whose epoch changed has left the section it was tracked
+        // in, and (tracked after an earlier fence) cannot load any of the batch's values
+        // again. That `publish()` already ran makes no difference: the batches waiting here
+        // hold none of the values it retired.
+        if in_section.is_empty() {
+            // The usual case: no reader is in a read section, so every tracked reader has
+            // moved on.
+            Self::collect_prevs(prevs, pool, val_pool, |_, _| false, out);
+        } else if !prevs.is_empty() {
+            // A batch can wait through many writes (a guard held for a long time), and each
+            // write asks about every reader tracked for every waiting batch: answer from a
+            // table by slab index, as cheap as looking at the epoch itself.
+            if let Some(&(last, _)) = in_section.last() {
+                if scanned_epoch.len() <= last {
+                    scanned_epoch.resize(last + 1, 0);
+                }
+            }
+            for &(idx, v) in in_section.iter() {
+                scanned_epoch[idx] = v;
+            }
+            Self::collect_prevs(
+                prevs,
+                pool,
+                val_pool,
+                |idx, prev| scanned_epoch.get(idx).is_some_and(|&v| v == prev),
+                out,
+            );
+            for &(idx, _) in in_section.iter() {
+                scanned_epoch[idx] = 0;
+            }
+        }
+        self.track_retired(readers, out);
     }
 
     /// Scan `prevs` for batches whose readers have all moved on, collect their values into `out`.
     ///
+    /// `still_in(idx, epoch)` says whether the reader at slab index `idx` is still in the read
+    /// section with `epoch`, from an `Acquire` load of its epoch (see the callers).
+    ///
+    /// Takes the fields of `WriterState` it uses rather than all of it, so that `still_in` can
+    /// borrow the others.
+    ///
     /// Requires `epochs` to be locked.
-    fn collect_prevs(&self, epochs: &slab::Slab<Epoch>, out: &mut Vec<Box<T>>) {
+    fn collect_prevs(
+        prevs: &mut Vec<Retired<T>>,
+        pool: &mut Vec<Vec<TrackedReader>>,
+        val_pool: &mut Vec<Vec<*mut T>>,
+        still_in: impl Fn(usize, usize) -> bool,
+        out: &mut Vec<Box<T>>,
+    ) {
         // We need to move the values out of `prevs` and into `out`. `extract_if` would work.
         // `retain_mut` doesn't unless we play some unsafe games with pointers in `prev`.
         //
         // FIXME: switch to `extract_if` once it's stable.
 
-        let state = self.state_mut();
         let mut i = 0;
-        while i < state.prevs.len() {
-            let tracked = &mut state.prevs[i].tracked;
-            tracked.retain(|(idx, prev)| {
-                // Acquire pairs with the `Release` epoch stores in `ReadGuard::drop`,
-                // `Reader::read()` (entry) and `Reader::drop`. Without it, the reader's loads from the old value are not
-                // ordered before the free, which would be a data race on the freed memory
-                // (allowed by the memory model on weakly ordered targets; not expressible by
-                // loom's interleaving model, so loom can't catch this).
-                epochs
-                    .get(*idx)
-                    .is_some_and(|e| e.epoch.load(ord::COLLECT_LOAD) == *prev)
-            });
+        while i < prevs.len() {
+            let tracked = &mut prevs[i].tracked;
+            // a reader is still in the section it was tracked in while its epoch is unchanged
+            tracked.retain(|(idx, prev)| still_in(*idx, *prev));
 
             if tracked.is_empty() {
-                let Retired { vals, tracked } = state.prevs.remove(i);
+                let Retired { vals, tracked } = prevs.remove(i);
                 // SAFETY: every reader that could have been dereferencing one of `vals` was
                 // tracked by `track_retired()`, and `tracked` being empty means each has been
-                // observed to leave the read section it was tracked in: the `Acquire` load in
-                // `retain` pairs with the `Release` epoch stores in `ReadGuard::drop` and
+                // observed to leave the read section it was tracked in: the `Acquire` load behind
+                // `still_in` pairs with the `Release` epoch stores in `ReadGuard::drop` and
                 // `Reader::read()`, so their last access to the values happens-before this
                 // point. Such a reader can never load these values again: `track_retired()` saw
                 // it in its tracked section *after* the writer's `SeqCst` fence, so every later
@@ -688,11 +782,11 @@ impl<T> Writer<T> {
                     RetiredVals::One(val) => out.push(unsafe { Box::from_raw(val) }),
                     RetiredVals::Many(mut vals) => {
                         out.extend(vals.drain(..).map(|val| unsafe { Box::from_raw(val) }));
-                        state.val_pool.push(vals);
+                        val_pool.push(vals);
                     }
                 }
                 // recycle the allocation, if the batch had one
-                tracked.recycle(&mut state.pool);
+                tracked.recycle(pool);
             } else {
                 i += 1;
             }
@@ -818,43 +912,40 @@ impl<T> Writer<T> {
         // in a read section, and have said which single value they hold
         let mut holders = std::mem::take(&mut state.holders);
 
-        for (idx, reader) in readers.slab.iter() {
-            // `Acquire`: see the plain scan in `track_retired()`.
-            let v = reader.epoch.load(ord::SCAN_LOAD);
-            if v == DEAD {
-                state.saw_dead = true;
-            } else if v & READER_FLAG != 0 {
-                // The reader is (or just was) in the read section with epoch `v`. Has it said
-                // which value that section holds?
-                //
-                // Whatever this load returns was stored during section `v` or a later one,
-                // never an earlier one: the reader clears `held` before it leaves a section,
-                // which is before the store of `v` that our `Acquire` load of the epoch
-                // synchronized with. So:
-                //
-                // - null: section `v` has not said (or the reader has since left it, or is
-                //   between sections). Assume it may hold anything, as for a plain reader.
-                // - `p`, stored in section `v`: that section holds `p` and, by the rules on
-                //   `ReaderState::held`, never anything else. It needs none of the other values.
-                // - `p`, stored in a later section: section `v` is over, so it needs nothing.
-                //   The later section started after our fence (we saw the reader in `v` after
-                //   it), so it is in the "Re-entry" case and cannot have loaded a value retired
-                //   before the fence: `p` is none of those, and the reader is not tracked.
-                //
-                // In the last two cases, tracking the reader for `p` alone (with epoch `v`) is
-                // exactly right, or (third case) more than is needed.
-                //
-                // `Acquire` matters in the third case. The values section `v` used can be
-                // freed straight away then, so its reads must happen-before this point, and
-                // the epoch load above does not provide that: it saw the *entry* of `v`.
-                // Seeing a pointer stored in a later section does, as the reader left `v`
-                // before it stored it.
-                let held = reader.held.load(ord::HELD_LOAD);
-                if held.is_null() {
-                    remaining_readers.push((idx, v));
-                } else {
-                    holders.push((idx, v, held.cast::<T>()));
-                }
+        for &(idx, v) in &state.in_section {
+            // `v` is from the `Acquire` load in `scan()`, and the load of `held` below comes
+            // after it.
+            let reader = &readers.slab[idx];
+            // The reader is (or just was) in the read section with epoch `v`. Has it said
+            // which value that section holds?
+            //
+            // Whatever this load returns was stored during section `v` or a later one,
+            // never an earlier one: the reader clears `held` before it leaves a section,
+            // which is before the store of `v` that our `Acquire` load of the epoch
+            // synchronized with. So:
+            //
+            // - null: section `v` has not said (or the reader has since left it, or is
+            //   between sections). Assume it may hold anything, as for a plain reader.
+            // - `p`, stored in section `v`: that section holds `p` and, by the rules on
+            //   `ReaderState::held`, never anything else. It needs none of the other values.
+            // - `p`, stored in a later section: section `v` is over, so it needs nothing.
+            //   The later section started after our fence (we saw the reader in `v` after
+            //   it), so it is in the "Re-entry" case and cannot have loaded a value retired
+            //   before the fence: `p` is none of those, and the reader is not tracked.
+            //
+            // In the last two cases, tracking the reader for `p` alone (with epoch `v`) is
+            // exactly right, or (third case) more than is needed.
+            //
+            // `Acquire` matters in the third case. The values section `v` used can be
+            // freed straight away then, so its reads must happen-before this point, and
+            // the epoch load above does not provide that: it saw the *entry* of `v`.
+            // Seeing a pointer stored in a later section does, as the reader left `v`
+            // before it stored it.
+            let held = reader.held.load(ord::HELD_LOAD);
+            if held.is_null() {
+                remaining_readers.push((idx, v));
+            } else {
+                holders.push((idx, v, held.cast::<T>()));
             }
         }
 
@@ -883,16 +974,14 @@ impl<T> Writer<T> {
         state.holders = holders;
     }
 
-    /// Find the readers that may still be using the values retired since the last call, and
-    /// track them as one batch. If there are none, the values go straight to `out`.
+    /// The writer's fence, then one `Acquire` load of every reader's epoch. The readers found
+    /// in a read section go to `WriterState::in_section`.
+    ///
+    /// `track_retired()` decides from these which readers to track for the values retired
+    /// before the fence, and `collect_prevs()` which batches to free.
     ///
     /// Requires `epochs` to be locked.
-    fn track_retired(&self, readers: &Readers, out: &mut Vec<Box<T>>) {
-        let state = self.state_mut();
-        if state.unscanned.is_empty() {
-            return;
-        }
-
+    fn scan(&self, slab: &slab::Slab<Epoch>) {
         // This fence (and its counterpart in `Reader::read()`) cannot be relaxed to `Acquire`
         // and/or `Release`: reader and writer form the store-buffering (SB) litmus pattern:
         //
@@ -911,7 +1000,7 @@ impl<T> Writer<T> {
         // SC order, then the load sees that store or a later one. For any read section, let F_R
         // be the fence in its `Reader::read()`:
         //
-        // - In flight: if F_R precedes this fence, the epoch scan below sees the section's entry
+        // - In flight: if F_R precedes this fence, the epoch loads below see the section's entry
         //   flag (or a later epoch). Any section that might load a retired value is therefore
         //   tracked.
         // - Re-entry: if this fence precedes F_R, the section's load of `active` sees the last
@@ -925,31 +1014,55 @@ impl<T> Writer<T> {
         // needs is that a section in the "Re-entry" case loads something newer than each.
         ord::writer_fence();
 
+        let state = self.state_mut();
+        state.in_section.clear();
+        // `slab.iter()` goes by slab index, so `in_section` is sorted by it
+        for (idx, reader) in slab.iter() {
+            // This must be `Acquire`, not `Relaxed`. A reader that `track_retired()` does *not*
+            // track (idle, or dead) can have the values freed straight away, and so can a
+            // batch whose tracked reader `collect_prevs()` sees in a later epoch: the reader's
+            // earlier accesses to them must happen-before that free. The acquire provides this
+            // by pairing with the `Release` epoch stores in `ReadGuard::drop`, `Reader::read()`
+            // (entry) and `Reader::drop`. The fence above makes sure a reader that might still
+            // load one of the values shows up here as in-section and gets tracked (see "In
+            // flight").
+            let v = reader.epoch.load(ord::SCAN_LOAD);
+            if v == DEAD {
+                state.saw_dead = true;
+            } else if v & READER_FLAG != 0 {
+                state.in_section.push((idx, v));
+            }
+        }
+    }
+
+    /// Find the readers that may still be using the values retired before the last `scan()`,
+    /// from the readers it found in a read section (`WriterState::in_section`), and track them
+    /// as one batch.
+    /// If there are none, the values go straight to `out`.
+    ///
+    /// Requires `epochs` to be locked.
+    fn track_retired(&self, readers: &Readers, out: &mut Vec<Box<T>>) {
+        let state = self.state_mut();
+        if state.unscanned.is_empty() {
+            return;
+        }
+
         // collect the readers that may still be reading the retired values, so we can free them
         // later: those in a read section, which may be using any of the values.
-        let mut remaining_readers = state.pool.pop().unwrap_or_default();
-
+        //
         // Only a `CachedReader` says which value it holds. Without any, nobody has, and the
         // scan is the plain one: no look at `held`, nothing to sort out afterwards. (The count
-        // cannot change under us: creating a `CachedReader` needs the lock we hold.)
-        if readers.cached == 0 {
-            for (idx, reader) in readers.slab.iter() {
-                // This must be `Acquire`, not `Relaxed`. A reader we do *not* track here (idle,
-                // or dead) can have the values freed straight away, so its earlier accesses to
-                // them must happen-before that free. The acquire provides this by pairing with
-                // the `Release` epoch stores in `ReadGuard::drop`, `Reader::read()` (entry) and
-                // `Reader::drop`. The fence above makes sure a reader that might still load one
-                // of the values shows up here as in-section and gets tracked (see "In flight").
-                let v = reader.epoch.load(ord::SCAN_LOAD);
-                if v == DEAD {
-                    state.saw_dead = true;
-                } else if v & READER_FLAG != 0 {
-                    remaining_readers.push((idx, v));
-                }
-            }
+        // cannot change under us: creating a `CachedReader` needs the lock we hold.) Then the
+        // scan's list is the one to track, as it is: it moves to the batch, and the next scan
+        // fills a list from the pool.
+        let mut remaining_readers = if readers.cached == 0 {
+            let empty = state.pool.pop().unwrap_or_default();
+            std::mem::replace(&mut state.in_section, empty)
         } else {
+            let mut remaining_readers = state.pool.pop().unwrap_or_default();
             Self::track_holders(state, readers, &mut remaining_readers);
-        }
+            remaining_readers
+        };
 
         if state.unscanned.is_empty() {
             // every value went into a batch of its own above

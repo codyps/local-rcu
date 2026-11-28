@@ -251,6 +251,60 @@ fn reentry_never_observes_collected_value() {
     }
 }
 
+/// The same as `reentry_never_observes_collected_value`, but the values come back from
+/// `try_sync()` calls that have nothing new to track: those only look at the readers tracked for
+/// the waiting values, with no fence first. A reader seen in a later read section than the one
+/// it was tracked in lets its value go, and only the epoch stores of that reader (the one that
+/// left the tracked section, and the one that entered the next) order its reads of the value
+/// before the writer overwrites it. `write()` looks at the readers after its fence, which under
+/// miri orders them by itself, so this has to go through `try_sync()` to show a missing order.
+#[test]
+fn try_sync_never_frees_a_value_in_use() {
+    const POISON: usize = usize::MAX;
+    let writes = if cfg!(miri) { 100 } else { 10_000 };
+    let n_readers = 2;
+
+    let (mut w, r) = local_rcu::slot(0usize);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let readers: Vec<_> = (0..n_readers)
+        .map(|_| {
+            let mut r = r.clone();
+            let done = done.clone();
+            thread::spawn(move || {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    // short sections, back to back, so re-entry races with collection
+                    let g = r.read();
+                    let a = *g;
+                    let b = *g;
+                    assert_ne!(a, POISON, "read a collected value");
+                    assert_eq!(a, b, "value changed during a read section");
+                }
+            })
+        })
+        .collect();
+    drop(r);
+
+    for i in 1..=writes {
+        for mut old in w.write(Box::new(i)) {
+            *old = POISON;
+        }
+        // nothing new to track: these only look at the readers tracked for waiting values
+        for _ in 0..3 {
+            for mut old in w.try_sync() {
+                *old = POISON;
+            }
+        }
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    for t in readers {
+        t.join().unwrap();
+    }
+    for mut old in w.sync() {
+        *old = POISON;
+    }
+}
+
 /// A reader that has been dropped is not waited for: the writer may hand back a value as soon
 /// as it sees that the reader is gone, even one the reader read a moment ago. The reader's
 /// reads have to be ordered before that, which is all its final epoch store is there for. The

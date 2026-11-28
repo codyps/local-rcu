@@ -41,6 +41,13 @@ harness = false
 [profile.release]
 debug = true
 
+# One codegen unit for the benchmarks: with several, how the crate is split between them
+# decides what the optimizer knows about calls in another unit, and an unrelated change can
+# then add instructions to the read loops (the pointers in a `Reader` reloaded after every
+# fence instead of kept in registers). See also `.github/scripts/bench_ab.sh`.
+[profile.bench]
+codegen-units = 1
+
 
 # The loom tests check the reader's load of the value as a consume load
 # (`--cfg local_rcu_loom_consume`, see `ord::active_load()` in src/lib.rs).

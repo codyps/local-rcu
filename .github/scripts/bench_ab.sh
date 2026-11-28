@@ -40,6 +40,9 @@ out=$3
 rounds=${ROUNDS:-10}
 layouts=${LAYOUTS:-5}
 export BENCH_PASSES=${BENCH_PASSES:-1}
+# What `[profile.bench]` in Cargo.toml sets, for a baseline from before it did: both sides
+# have to be built the same way to compare
+export CARGO_PROFILE_BENCH_CODEGEN_UNITS=1
 
 root=$(git rev-parse --show-toplevel)
 # one target directory for both: the dependencies are built once
