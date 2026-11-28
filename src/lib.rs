@@ -420,6 +420,13 @@ struct WriterState<T> {
     /// epoch), by slab index. Only meaningful between a scan and the end of that call.
     in_section: Vec<TrackedReader>,
 
+    /// Scratch space for `Writer::scan_collect_track()`, by slab index: the epoch the scan saw
+    /// for each reader in `in_section`, and 0 everywhere else (0 has no `READER_FLAG`, so it
+    /// is never a tracked epoch). Only the entries of `in_section` are ever set, and they are
+    /// put back to 0 before that call returns, so keeping it costs nothing for idle readers.
+    /// Its length is the highest slab index found in a section so far, plus one.
+    scanned_epoch: Vec<usize>,
+
     /// Set when a `DEAD` epoch has been observed and the epoch slab needs a sweep to recycle
     /// dropped readers.
     saw_dead: bool,
@@ -535,6 +542,7 @@ impl<T> Writer<T> {
                 val_pool: Vec::new(),
                 holders: Vec::new(),
                 in_section: Vec::new(),
+                scanned_epoch: Vec::new(),
                 pool: Vec::new(),
                 saw_dead: false,
             }),
@@ -680,6 +688,18 @@ impl<T> Writer<T> {
         self.scan(&readers.slab);
         let state = self.state_mut();
         let in_section = std::mem::take(&mut state.in_section);
+        let mut scanned_epoch = std::mem::take(&mut state.scanned_epoch);
+        // A batch can wait through many writes (a guard held for a long time), and each write
+        // asks about every reader tracked for every waiting batch: answer from a table by slab
+        // index, as cheap as looking at the epoch itself.
+        if let Some(&(last, _)) = in_section.last() {
+            if scanned_epoch.len() <= last {
+                scanned_epoch.resize(last + 1, 0);
+            }
+        }
+        for &(idx, v) in &in_section {
+            scanned_epoch[idx] = v;
+        }
         // An epoch from the scan is as good for collecting as one loaded just for that: it is
         // an `Acquire` load of the same epoch, and only later than one `collect_prevs()` could
         // have made before the scan. A tracked reader is tracked with an epoch in a read
@@ -689,15 +709,16 @@ impl<T> Writer<T> {
         // again. That `publish()` already ran makes no difference: the batches waiting here
         // hold none of the values it retired.
         self.collect_prevs(
-            |idx, prev| {
-                in_section
-                    .binary_search_by_key(&idx, |&(i, _)| i)
-                    .is_ok_and(|at| in_section[at].1 == prev)
-            },
+            |idx, prev| scanned_epoch.get(idx).is_some_and(|&v| v == prev),
             out,
         );
         self.track_retired(readers, &in_section, out);
-        self.state_mut().in_section = in_section;
+        for &(idx, _) in &in_section {
+            scanned_epoch[idx] = 0;
+        }
+        let state = self.state_mut();
+        state.in_section = in_section;
+        state.scanned_epoch = scanned_epoch;
     }
 
     /// Scan `prevs` for batches whose readers have all moved on, collect their values into `out`.
@@ -724,7 +745,7 @@ impl<T> Writer<T> {
                 // SAFETY: every reader that could have been dereferencing one of `vals` was
                 // tracked by `track_retired()`, and `tracked` being empty means each has been
                 // observed to leave the read section it was tracked in: the `Acquire` load behind
-                // `epoch_now` pairs with the `Release` epoch stores in `ReadGuard::drop` and
+                // `still_in` pairs with the `Release` epoch stores in `ReadGuard::drop` and
                 // `Reader::read()`, so their last access to the values happens-before this
                 // point. Such a reader can never load these values again: `track_retired()` saw
                 // it in its tracked section *after* the writer's `SeqCst` fence, so every later
