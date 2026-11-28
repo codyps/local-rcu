@@ -1,0 +1,38 @@
+name: notify-rcu-bench
+
+# Ask codyps/rcu-bench to rebuild against this main and re-run its
+# benchmarks: its bench workflow listens for the `local-rcu-main`
+# repository_dispatch event and runs `cargo update -p local-rcu` first.
+#
+# Needs the secret RCU_BENCH_DISPATCH_TOKEN: a fine-grained token for
+# codyps/rcu-bench with "Contents: read and write" (what the dispatches API
+# asks for). Without it this does nothing.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "build.rs"
+      - "Cargo.toml"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send repository_dispatch to rcu-bench
+        env:
+          GH_TOKEN: ${{ secrets.RCU_BENCH_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::RCU_BENCH_DISPATCH_TOKEN is not set; rcu-bench not notified"
+            exit 0
+          fi
+          gh api repos/codyps/rcu-bench/dispatches \
+            -f event_type=local-rcu-main \
+            -f "client_payload[sha]=$GITHUB_SHA"
